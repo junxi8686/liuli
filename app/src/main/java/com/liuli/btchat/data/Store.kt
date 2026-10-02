@@ -10,6 +10,7 @@ import com.liuli.btchat.core.Member
 import com.liuli.btchat.core.Message
 import com.liuli.btchat.core.MsgKind
 import com.liuli.btchat.core.MsgState
+import com.liuli.btchat.core.Svc
 import com.liuli.btchat.core.TransferState
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -161,11 +162,41 @@ object Store : ChatStore {
         write({ MemoryFallback.saveConversation(c) }) { it.saveConversation(c) }
     }
 
+    /**
+     * Removing a conversation has to take its media with it.
+     *
+     * This used to delete only rows. Of the half-dozen places that call this
+     * (删除会话, 退群, 解散群, 被移出群聊, 删除好友…), exactly one remembered to
+     * delete the attachments first, so every other path left the pictures,
+     * videos and voice notes in `files/media` forever — the rows that held their
+     * paths are gone, so nothing can ever find them again.
+     *
+     * Doing it here fixes all callers at once, and it must happen *before* the
+     * rows go: afterwards there is no way to know which files belonged to this
+     * conversation.
+     */
     override fun deleteConversation(id: String) {
+        runCatching {
+            messages(id, limit = Int.MAX_VALUE).forEach { m ->
+                m.attachment?.let { att -> runCatching { Svc.media.deleteAttachmentFiles(att) } }
+            }
+        }
         write({ MemoryFallback.deleteConversation(id) }) { it.deleteConversation(id) }
     }
 
+    /**
+     * Same reasoning as [deleteConversation], for 清空聊天记录.
+     *
+     * `messages()` defaults to a window of 400, which silently skipped the
+     * attachments of anything older — so a long conversation kept its oldest
+     * media on disk while the rows were deleted.
+     */
     override fun clearHistory(convId: String) {
+        runCatching {
+            messages(convId, limit = Int.MAX_VALUE).forEach { m ->
+                m.attachment?.let { att -> runCatching { Svc.media.deleteAttachmentFiles(att) } }
+            }
+        }
         write({ MemoryFallback.clearHistory(convId) }) { it.clearHistory(convId) }
     }
 

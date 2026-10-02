@@ -134,9 +134,16 @@ object MediaVaultImpl : MediaVault {
         }.getOrNull()
     }
 
+    /**
+     * Allocates the destination for a payload that is about to arrive.
+     *
+     * The transfer id arrives **off the wire**, so it is sanitised before it becomes part of a
+     * path: without that, a peer could offer `"../../databases/liuli"` and steer the write out of
+     * `files/media` entirely. The file name is sanitised the same way.
+     */
     override fun newIncomingFile(transferId: String, fileName: String): File {
         val safe = fileName.replace(Regex("[^A-Za-z0-9._\\u4e00-\\u9fff-]"), "_").takeLast(80)
-        return File(mediaDir, "${transferId}__$safe")
+        return File(mediaDir, "${MediaLayout.key(transferId)}__$safe")
     }
 
     /**
@@ -150,9 +157,11 @@ object MediaVaultImpl : MediaVault {
         MediaLayout.payloadFile(ctx, transferId, MediaFiles.voiceFileName(transferId))
 
     override fun deleteTransferFiles(transferId: String) {
+        // Same key as newIncomingFile, or a sanitised name would never be deleted again.
+        val key = MediaLayout.key(transferId)
         runCatching { MediaLayout.thumbFile(ctx, transferId).delete() }
         runCatching {
-            mediaDir.listFiles { f -> f.name.startsWith("${transferId}__") }?.forEach { it.delete() }
+            mediaDir.listFiles { f -> f.name.startsWith("${key}__") }?.forEach { it.delete() }
         }
     }
 

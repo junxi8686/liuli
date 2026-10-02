@@ -75,6 +75,16 @@ class TransferManager(
     private val outgoing = ConcurrentHashMap<String, Outgoing>()
     private val incoming = ConcurrentHashMap<String, Incoming>()
 
+    /**
+     * 通话中判定（由 Engine 注入 `Engine.call.value.busy`）。
+     * 通话中自动下载会同时毁掉通话和下载，所以这是一道硬闸。
+     */
+    @Volatile
+    var inCall: () -> Boolean = { false }
+
+    /** 处在「等待中」的接收任务 → 下次可以重试的时间。 */
+    private val waitingRetryAt = ConcurrentHashMap<String, Long>()
+
     init {
         // 超时扫描：接收方中途没数据、或发送方卡住时收尾，避免 UI 永久停在「传输中」。
         scope.launch {
@@ -88,6 +98,12 @@ class TransferManager(
     /** 发现长时间没有任何进展的传输并收尾（对端掉线之外的最后一道保险）。 */
     private fun sweepStale() {
         val now = System.currentTimeMillis()
+        // 1) 「等待中」的任务定期重试：链路可能已经恢复，发送方可能已经上线
+        for ((transferId, due) in waitingRetryAt.entries.toList()) {
+            if (now < due) continue
+            waitingRetryAt.remove(transferId)
+            incoming[transferId]?.let { if (it.state == TransferState.OFFERED) accept(transferId) }
+        }
         for (inc in incoming.values.toList()) {
             if (inc.state != TransferState.TRANSFERRING) continue
             if (now - inc.lastActivityAt > BtConstants.TRANSFER_IDLE_TIMEOUT_MS) {
@@ -240,10 +256,13 @@ class TransferManager(
             return
         }
         val targets = router.targetsForConv(conv)
-        if (targets.isEmpty() || targets.none { router.isOnline(it) }) {
+        if (targets.isEmpty()) {
             markFailed(att, msg, "没有可用链路", 0L)
             return
         }
+        // 注意：目标**不直接在线**也要继续 —— OFFER 会走 Router.broadcast，由它决定
+        // 直发还是交给中继保管（A 只连着 B 也能把图片的 OFFER 送到 D 手里）。
+        // 真正的「完全没路」由 runSend 里 offered <= 0 判定。
         val out = Outgoing(
             transferId = att.transferId,
             msgId = msg.id,
@@ -336,9 +355,11 @@ class TransferManager(
                     for (p in parents) {
                         if (p.isClosed) continue
                         val ok = p.enqueue(
-                            Connection.WriteTask("chunk:$chunkSeq") { o ->
-                                Wire.writeChunk(o, out.transferId, chunkSeq, data, 0, data.size)
-                            },
+                            Connection.WriteTask(
+                                label = "chunk:$chunkSeq",
+                                write = { o -> Wire.writeChunk(o, out.transferId, chunkSeq, data, 0, data.size) },
+                                bytes = data.size
+                            ),
                             waitMs = 5_000L
                         )
                         if (!ok) {
@@ -476,25 +497,76 @@ class TransferManager(
                 fileName = p.fileName, total = p.size, done = 0L, state = TransferState.OFFERED
             )
         )
-        // 语音（按住说话的短音频）**无条件自动接收**：它只有几十到几百 KB，
-        // 而「对方说完还要等本机点接收」完全违背按住说话的交互。
-        // 图片/视频/文件仍然受 autoAcceptMedia 开关控制。
+        // 媒体**强制自动接收**（用户明确要求「必须自动下载」）：语音、图片、视频、文件
+        // 一律立刻开始，不再看 autoAcceptMedia 开关。用户仍然可以中途 cancel（FILE_ABORT）。
         val isVoice = kind == MsgKind.VOICE || p.mime.startsWith("audio/", ignoreCase = true)
-        val autoAccept = isVoice || settings.current().autoAcceptMedia
-        router.onNotice?.invoke(
-            "收到${if (isVoice) "语音" else "文件"}「${p.fileName}」${if (autoAccept) "，自动接收中" else "，等待接收"}"
-        )
-        if (autoAccept) accept(p.transferId)
+        router.onNotice?.invoke("收到${if (isVoice) "语音" else "文件"}「${p.fileName}」，自动接收中")
+        accept(p.transferId)
     }
 
-    /** UI / 调试页调用：接受一个 OFFERED 的传输。 */
+    /** UI / 调试页调用：接受一个 OFFERED 的传输（现在也是自动下载的唯一入口）。 */
     fun accept(transferId: String) {
         val inc = incoming[transferId] ?: return
         if (inc.state != TransferState.OFFERED) return
-        val f = media.newIncomingFile(transferId, inc.fileName)
-        f.parentFile?.mkdirs()
-        inc.file = f
-        inc.sink = BufferedOutputStream(FileOutputStream(f), 128 * 1024)
+        // 字节的持有者够不够得着？三种情况都算「够得着」：
+        // 1. OFFER 就是对端本人直接发来的（直连）；
+        // 2. 群聊：群主会替发送者转发分片（星型拓扑），只要群主在线就有路；
+        // 3. 对端此刻在线。
+        // 都不满足 = 信封经中继到了、但字节没人送 —— 如实标「等待发送方上线」，
+        // 不假装在下载；等链路建立后由 onLinkReady 自动开始。
+        val directPath = inc.source.remoteId == inc.fromId && !inc.source.isClosed
+        val groupPath = inc.groupId != null &&
+            router.connectionFor(router.groupOwnerId(inc.groupId!!) ?: "") != null
+        if (!directPath && !groupPath && !router.isOnline(inc.fromId)) {
+            waitingRetryAt[transferId] = System.currentTimeMillis() + BtConstants.WAIT_RETRY_MS
+            store.setMessageProgress(inc.msgId, 0L, 0f, TransferState.WAITING_SENDER)
+            upsert(
+                TransferProgress(
+                    transferId = transferId, messageId = inc.msgId, convId = inc.convId, outgoing = false,
+                    fileName = inc.fileName, total = inc.size, done = 0L,
+                    state = TransferState.WAITING_SENDER, waitNote = WAIT_SENDER_NOTE
+                )
+            )
+            return
+        }
+        // 链路质量门限：通话中硬闸 —— 通话已经占满链路，再自动下载会把两者一起毁掉。
+        // 注意：这里**不**用「本机写吞吐」当判据 —— 下载时我在写的是 ACK 之类的小包，
+        // 代表不了对方发给我的速度。对方发得太慢由接收过程中的速率监控负责（见 onChunk）。
+        if (inCall() && inc.size > BtConstants.CALL_HARD_GATE_BYTES) {
+            waitingRetryAt[transferId] = System.currentTimeMillis() + BtConstants.WAIT_RETRY_MS
+            store.setMessageProgress(inc.msgId, 0L, 0f, TransferState.WAITING_LINK)
+            upsert(
+                TransferProgress(
+                    transferId = transferId, messageId = inc.msgId, convId = inc.convId, outgoing = false,
+                    fileName = inc.fileName, total = inc.size, done = 0L,
+                    state = TransferState.WAITING_LINK, waitNote = WAIT_CALL_NOTE
+                )
+            )
+            return
+        }
+        // 落盘目标必须在应用自己的目录内：transferId 是**对端可控**的线上字段，
+        // 一旦拼出 `../../databases/x` 就能覆盖应用私有目录里的其它文件。
+        // 强制自动接收之后每个入站 offer 都会走到这里，所以必须挡住。
+        if (!isSafeTransferId(inc.transferId)) {
+            cleanupIncoming(inc, TransferState.FAILED, "非法的传输标识（已拒绝）", notifyPeer = true)
+            return
+        }
+        val f = try {
+            media.newIncomingFile(inc.transferId, inc.fileName)
+        } catch (t: Throwable) {
+            cleanupIncoming(inc, TransferState.FAILED, "无法创建接收文件: ${t.message}", notifyPeer = true)
+            return
+        }
+        try {
+            f.parentFile?.mkdirs()
+            inc.file = f
+            inc.sink = BufferedOutputStream(FileOutputStream(f), 128 * 1024)
+        } catch (t: Throwable) {
+            // 磁盘满 / 无权限：如实失败并通知对端，别留一个 0 字节文件和卡住的状态
+            runCatching { f.delete() }
+            cleanupIncoming(inc, TransferState.FAILED, "无法写入（存储空间不足？）", notifyPeer = true)
+            return
+        }
         inc.state = TransferState.TRANSFERRING
         store.setMessageProgress(inc.msgId, 0L, 0f, TransferState.TRANSFERRING)
         upsert(
@@ -627,8 +699,84 @@ class TransferManager(
     }
 
     /** 链路断开：相关传输立即失败，半截文件清掉，避免留下脏数据。 */
-    fun onLinkClosed(conn: Connection) {
+    fun onLinkReady(conn: Connection) {
+        val peerId = conn.remoteId
+        if (peerId.isBlank()) return
+        // 1) 一直等着发送方的接收任务：字节的持有者上线了，立刻开始下载
+        for (inc in incoming.values.toList()) {
+            if (inc.fromId == peerId && inc.state == TransferState.OFFERED) accept(inc.transferId)
+        }
+        // 2) 之前因为链路问题没发出去的媒体：目标上线了，自动重新 OFFER
+        //    （否则对方等到发送方上线也没用 —— 发送方那边的传输早就超时了）
         for (out in outgoing.values.toList()) {
+            if (out.finished) continue
+            if (out.targets.contains(peerId) && out.sentBytes == 0L) {
+                out.pending.add(peerId)
+                val offer = buildOffer(out)
+                router.sendPacketTo(peerId, out.groupId, offer)
+            }
+        }
+    }
+
+    /**
+     * [transferId] 来自对端发来的 `FileOfferPacket`，是**不可信输入**。
+     *
+     * 落盘路径由它拼出来，一旦允许 `/`、`\`、`.`，对端就能用
+     * `transferId = "../../databases/x"` 逃出 `files/media/` 覆盖应用私有文件
+     * （包括数据库）。这里只接受本应用自己生成的那种 id：UUID 的 hex + 短横线。
+     *
+     * media-pipeline 已在 vault 侧做过一次消毒，这里是第二道闸 —— **强制自动接收之后
+     * 每个入站 offer 都会走到这条路径**，值得双保险。
+     */
+    private fun isSafeTransferId(id: String): Boolean =
+        id.length in 8..64 && TRANSFER_ID_PATTERN.matches(id)
+
+    /** 由一条待发传输构造 FILE_OFFER（重试与新发共用）。 */
+    private fun buildOffer(out: Outgoing) = FileOfferPacket(
+        transferId = out.transferId,
+        msgId = out.msgId,
+        convId = out.convId,
+        kind = out.kind.name,
+        fileName = out.fileName,
+        mime = out.mime,
+        size = out.size,
+        sha256 = out.sha256,
+        width = out.width,
+        height = out.height,
+        durationMs = out.durationMs,
+        thumbB64 = out.thumbB64,
+        at = System.currentTimeMillis()
+    )
+
+    /**
+     * 链路够不够用来下载这次传输。
+     *
+     * 判据来自 [Connection] 自己实测的写入吞吐（EWMA）+ 队列积压 —— 测量必须放在
+     * 真正写字节的地方，才不会被「平均下来很好看」骗到：
+     * * `callActive` 是**硬闸**：通话中再自动下载会把通话和下载一起毁掉，
+     *   只放行 ≤200KB 的小东西（缩略图/语音）；
+     * * 还没有样本（刚连上）→ 小文件（≤2MB）按标称速率乐观放行，大文件等一次实测；
+     * * 实测吞吐低于 [BtConstants.MIN_USABLE_BPS] 或积压超过 [BtConstants.LINK_BACKLOG_LIMIT]
+     *   → 判定「链路太差，等待中」，等链路恢复后自动重试。
+     */
+    private fun linkUsable(conn: Connection, size: Long): Boolean {
+        // 通话中硬闸：音频/视频已经占满链路，再自动下载会把通话和下载一起毁掉。
+        // 只放行缩略图/语音这种小东西。
+        if (inCall() && size > BtConstants.CALL_HARD_GATE_BYTES) return false
+        if (conn.pendingWrites > BtConstants.LINK_BACKLOG_LIMIT) return false
+        val bps = conn.currentWriteBps()
+        if (bps <= 0) {
+            // 还没有实测样本：小文件乐观放行，大文件等一次实测
+            return size <= BtConstants.OPTIMISTIC_START_BYTES
+        }
+        if (bps < BtConstants.MIN_USABLE_BPS) return false
+        // ETA 太长也不值得开始（爬十分钟再失败最伤体验）
+        val etaSeconds = if (bps > 0) size / bps else Long.MAX_VALUE
+        return etaSeconds <= BtConstants.MAX_TRANSFER_ETA_SECONDS
+    }
+
+    /** 链路断开：相关传输立即失败，半截文件清掉，避免留下脏数据。 */
+    fun onLinkClosed(conn: Connection) {        for (out in outgoing.values.toList()) {
             if (!out.parents.containsKey(conn.id)) continue
             out.parents.remove(conn.id)
             if (out.parents.isEmpty() && !out.finished) {
@@ -782,5 +930,17 @@ class TransferManager(
 
     private companion object {
         val HEX = "0123456789abcdef".toCharArray()
+
+        /** 本应用自己生成的 transferId 形状（UUID）。 */
+        val TRANSFER_ID_PATTERN = Regex("[A-Za-z0-9-]{8,64}")
+
+        /** 等待发送方上线时的提示文案（UI 直接显示）。 */
+        const val WAIT_SENDER_NOTE = "等待发送方上线"
+
+        /** 链路太差、暂缓下载时的提示文案。 */
+        const val WAIT_LINK_NOTE = "链路太差，等待中（会自动重试）"
+
+        /** 通话中暂缓大文件下载时的提示文案。 */
+        const val WAIT_CALL_NOTE = "通话中，稍后自动下载"
     }
 }

@@ -295,12 +295,20 @@ fun LiuliRoot() {
                 label = "detail"
             ) { state ->
                 val screen = state.second
-                // Opaque: the detail layer must never let the tab stack show
-                // through, not even for one frame at the start of a transition.
+                // Opaque **only when there is actually a page here**.
+                //
+                // This box exists so a transitioning detail page can never let
+                // the tab stack show through. Painting it unconditionally was a
+                // white-screen bug: with an empty detail stack the target is
+                // `null`, so this drew a full-screen opaque page-coloured
+                // rectangle straight over the tab layer. Everything underneath
+                // stayed composed and laid out — accessibility still saw every
+                // button and taps fell through to it — which is why it looked
+                // like "the app is fine, nothing is just drawn".
                 Box(
                     Modifier
                         .fillMaxSize()
-                        .background(LiuliColors.Bg)
+                        .then(if (screen != null) Modifier.background(LiuliColors.Bg) else Modifier)
                 ) {
                     // 双栏下右栏没有内容时给空态，**不能**把 tab 层再露一遍。
                     if (wide && screen == null) {

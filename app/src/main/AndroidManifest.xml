@@ -82,9 +82,11 @@
             android:windowSoftInputMode="adjustResize"
             android:supportsPictureInPicture="true"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|smallestScreenSize|density"
-            android:showWhenLocked="true"
-            android:turnScreenOn="true"
             android:theme="@style/Theme.Liuli">
+            <!-- `showWhenLocked` / `turnScreenOn` were here for the full-screen
+                 incoming-call UI. That UI does not exist yet (task-22), and the
+                 two attributes change how the launch window is presented, so
+                 they are removed until there is something that needs them. -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />

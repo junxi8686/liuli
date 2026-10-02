@@ -27,6 +27,21 @@ object MediaEstimates {
     }
 
     /**
+     * [transferSeconds] against a **measured** rate instead of the nominal one.
+     *
+     * A caller that has a real throughput reading — the transport measures every byte it writes —
+     * should pass it, because the nominal 150 KB/s is only a way to size a file before anything
+     * has been observed. A non-positive [bytesPerSecond] falls back to [BYTES_PER_SECOND].
+     */
+    fun transferSeconds(bytes: Long, bytesPerSecond: Long): Int {
+        if (bytes <= 0L) return 0
+        val rate = if (bytesPerSecond > 0L) bytesPerSecond else BYTES_PER_SECOND
+        val whole = bytes / rate
+        val seconds = if (bytes % rate == 0L) whole else whole + 1
+        return seconds.coerceIn(1L, Int.MAX_VALUE.toLong()).toInt()
+    }
+
+    /**
      * Chinese ETA label for [seconds]: `约 30 秒` / `约 4 分钟` / `约 1 小时 6 分钟`.
      * Minutes are also rounded up — the estimate shown to the user is always the pessimistic one.
      */

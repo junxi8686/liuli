@@ -62,6 +62,29 @@ object BtConstants {
     /** 多久没有任何分片进展就判定这条传输卡死（群聊里晚加入/对端掉线的兜底）。 */
     const val TRANSFER_IDLE_TIMEOUT_MS = 30_000L
 
+    /**
+     * 链路可用性门限：实测写入吞吐低于这个值就先不下大文件。
+     *
+     * 8 KB/s 大约是 RFCOMM 实际可用带宽（100–200 KB/s）的二十分之一；
+     * 低于它就说明链路已经被挤爆或信号很差，硬下只会「爬十分钟然后失败」。
+     */
+    const val MIN_USABLE_BPS = 8_000L
+
+    /** 普通写队列积压超过这个数，就认为链路堵住了。 */
+    const val LINK_BACKLOG_LIMIT = 64
+
+    /** 还没有实测样本时，这个大小以内的文件可以直接开始下（缩略图/语音/小图）。 */
+    const val OPTIMISTIC_START_BYTES = 2L * 1024 * 1024
+
+    /** 通话中（[inCall] 为真）只放行这个大小以内的自动下载：缩略图、语音、小图。 */
+    const val CALL_HARD_GATE_BYTES = 200L * 1024
+
+    /** 预估耗时超过这个秒数就不开始下载（爬十分钟再失败最伤体验）。 */
+    const val MAX_TRANSFER_ETA_SECONDS = 90L
+
+    /** 「等待中」的任务多久重试一次。 */
+    const val WAIT_RETRY_MS = 15_000L
+
     /** 会话内 typing 指示的存活时间，超时会自动熄灭。 */
     const val TYPING_TTL_MS = 6_000L
 

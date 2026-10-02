@@ -136,7 +136,7 @@ object SelfTest {
      * 一旦泄漏就是 FAILED。
      */
     private suspend fun relayScenario(scope: CoroutineScope, root: File, report: Report) {
-        val t0 = now()
+        var t0 = now()
         val a = Node("RA", "ra-A", "阿离", 11, root, scope, autoAccept = true)
         val b = Node("RB", "ra-B", "小八", 22, root, scope, autoAccept = true)
         val c = Node("RC", "ra-C", "阿七", 33, root, scope, autoAccept = true)
@@ -259,6 +259,35 @@ object SelfTest {
             "⑥ 环回：A 重新连上 C，不重复投递、不无限转发",
             afterA == beforeA && dDuplicates == 1 && cStillClean,
             "A 侧消息数 $beforeA → $afterA（应不变）；D 侧该消息份数=$dDuplicates（应=1）；C 仍未入库=$cStillClean",
+            now() - t0
+        )
+
+        // ---- ⑥.5 媒体的「等待发送方上线」+ 手动取消
+        // A 现在连着 C（D 连不上 A）。A 发一张图给 D：信封能到 D，但字节的持有者 A
+        // 与 D 之间没有链路 → D 应如实停在「等待发送方上线」，而不是假装在下载。
+        t0 = now()
+        val picFile = File(root, "relay-pic.bin").apply { writeBytes(ByteArray(48 * 1024) { 0x2B }) }
+        val picMedia = ImportedMedia(
+            filePath = picFile.absolutePath, thumbPath = null, thumbB64 = null,
+            name = picFile.name, mime = "application/octet-stream", size = picFile.length(),
+            sha256 = sha256Of(picFile)
+        )
+        val picMsg = a.transfers.send(convAD.id, picMedia, MsgKind.FILE)
+        val picTid = picMsg?.attachment?.transferId.orEmpty()
+        val dWaiting = await(8_000) {
+            d.transferFlow.value.any { it.transferId == picTid && it.state == TransferState.WAITING_SENDER }
+        }
+        val dWaitNote = d.transferFlow.value.firstOrNull { it.transferId == picTid }?.waitNote
+        val dNoBytes = d.store.message(picMsg?.id.orEmpty())?.attachment?.localPath == null
+        // 自动下载 ≠ 不能取消：等待中的任务照样可以手动取消
+        d.transfers.cancel(picTid)
+        val cancelled = await(5_000) {
+            d.transferFlow.value.any { it.transferId == picTid && it.state == TransferState.CANCELLED }
+        }
+        report.step(
+            "⑧ 媒体信封先到、字节没人持有 → WAITING_SENDER；手动取消仍可用",
+            dWaiting && dNoBytes && cancelled,
+            "D 处于等待发送方上线=$dWaiting（waitNote=「$dWaitNote」）；D 没拿到字节=$dNoBytes；手动取消=$cancelled",
             now() - t0
         )
 
@@ -524,7 +553,7 @@ object SelfTest {
             now() - t0
         )
 
-        // ---- 10d. 语音无条件自动接收；普通文件仍受开关控制
+        // ---- 10d. 媒体**强制自动接收**：语音与普通文件都直接开始，不再看开关
         t0 = now()
         b.settings.edit { it.copy(autoAcceptMedia = false) }
         val voiceFile = File(root, "voice-3s.m4a").apply {
@@ -540,7 +569,7 @@ object SelfTest {
         val voiceOutcome = awaitTerminal(b, voiceTid, 20_000)
         val voiceAutoOk = voiceOutcome?.state == TransferState.DONE
 
-        // 反向验证：开关关着时，普通文件仍然停在 OFFERED 等用户点接收
+        // 开关关着也照样自动下：图片/视频/文件的自动接收同样是强制的
         val binFile = File(root, "switch-check.bin").apply { writeBytes(ByteArray(8 * 1024) { 0x5A }) }
         val binMedia = ImportedMedia(
             filePath = binFile.absolutePath, thumbPath = null, thumbB64 = null,
@@ -549,16 +578,13 @@ object SelfTest {
         )
         val binMsg = a.transfers.send(convAb.id, binMedia, MsgKind.FILE)
         val binTid = binMsg?.attachment?.transferId.orEmpty()
-        delay(800)
-        val binStayedOffered = b.transferFlow.value.firstOrNull { it.transferId == binTid }?.state == TransferState.OFFERED
-        b.transfers.accept(binTid) // 手动接收，收尾
-        val binDone = awaitTerminal(b, binTid, 20_000)?.state == TransferState.DONE
+        val binOutcome = awaitTerminal(b, binTid, 20_000)
+        val binAutoOk = binOutcome?.state == TransferState.DONE
         b.settings.edit { it.copy(autoAcceptMedia = true) }
         report.step(
-            "语音无条件自动接收；图片/文件仍受开关控制",
-            voiceAutoOk && binStayedOffered && binDone,
-            "autoAcceptMedia=false 时：语音=${describe(voiceOutcome)}（应 DONE）；" +
-                "普通文件停在 OFFERED=$binStayedOffered，手动接收后=$binDone",
+            "媒体强制自动接收（关掉开关也照下）",
+            voiceAutoOk && binAutoOk,
+            "autoAcceptMedia=false 时：语音=${describe(voiceOutcome)}、普通文件=${describe(binOutcome)}（都应 DONE）",
             now() - t0
         )
 

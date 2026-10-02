@@ -84,6 +84,8 @@ object Engine : ChatEngine {
         r.blockList = pendingBlockList
         r.transfers = t
         r.relay = relay
+        // 通话中自动下载的硬闸：通话已经占满链路，再下大文件会把两者一起毁掉
+        t.inCall = { callState.value.busy }
         // Forwarding media re-enters through the transfer pipeline.
         r.mediaSender = { convId, imported -> sendMedia(convId, imported) }
         // Reminders are raised through the service locator, so `bt` stays free

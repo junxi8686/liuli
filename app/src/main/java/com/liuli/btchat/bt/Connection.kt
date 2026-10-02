@@ -70,8 +70,13 @@ class Connection(
         fun onClosed(conn: Connection, reason: String)
     }
 
-    /** 一个待写入的帧。持有的是「怎么写」，不是字节，避免多一次 16 KB 拷贝。 */
-    class WriteTask(val label: String, val write: (OutputStream) -> Unit)
+    /**
+     * 一个待写入的帧。持有的是「怎么写」，不是字节，避免多一次 16 KB 拷贝。
+     *
+     * [bytes] 只用于吞吐统计（估计值即可），放在中间是为了让 `write` 保持在最后，
+     * 这样 `WriteTask("chunk") { ... }` 的尾随 lambda 写法依然可用。
+     */
+    class WriteTask(val label: String, val bytes: Int = 0, val write: (OutputStream) -> Unit)
 
     private val writes = LinkedBlockingQueue<WriteTask>(BtConstants.WRITE_QUEUE_CAPACITY)
 
@@ -87,6 +92,30 @@ class Connection(
 
     /** 因高优先队列溢出被丢弃的媒体帧数（诊断用，见 [BtConstants.CALL_QUEUE_CAPACITY]）。 */
     val callFramesDropped: Long get() = callDrops.get()
+
+    /** 累计写出的字节数。 */
+    @Volatile
+    var bytesWritten: Long = 0L
+        private set
+
+    private var windowBytes = 0L
+    private var windowBusyNs = 0L
+    /** 实测写入吞吐（字节/秒，EWMA）；0 = 样本还不够。 */
+    @Volatile
+    private var writeBps: Long = 0L
+
+    private val bpsFlow = MutableStateFlow(0L)
+
+    /** 实测吞吐变化（诊断/自测可观察）。 */
+    val writeBpsFlow: StateFlow<Long> = bpsFlow
+
+    /**
+     * 最近实测到的写入吞吐（字节/秒）；0 表示还没有样本。
+     *
+     * 用来判断「这条链路够不够通畅」—— 低于 [BtConstants.MIN_USABLE_BPS] 就先不下大文件，
+     * 免得爬十分钟然后失败。
+     */
+    fun currentWriteBps(): Long = writeBps
 
     private val closed = AtomicBoolean(false)
     private val ready = AtomicBoolean(false)
@@ -170,7 +199,7 @@ class Connection(
 
     /** 入队一个文件分片。 */
     fun sendChunk(transferId: String, seq: Int, data: ByteArray, offset: Int, len: Int): Boolean =
-        tryEnqueue(WriteTask("chunk:$seq") { out -> Wire.writeChunk(out, transferId, seq, data, offset, len) })
+        tryEnqueue(WriteTask("chunk:$seq", len) { out -> Wire.writeChunk(out, transferId, seq, data, offset, len) })
 
     /**
      * 带背压的入队：队列满时最多等 [waitMs] 毫秒（每 100 ms 让出一次线程，
@@ -249,8 +278,10 @@ class Connection(
                     if (closed.get()) break
                     continue
                 }
+                val t0 = System.nanoTime()
                 task.write(out)
                 out.flush()
+                accountWritten(task.bytes, System.nanoTime() - t0)
             }
         } catch (t: Throwable) {
             close("写入失败: ${t.message ?: t.javaClass.simpleName}")
@@ -262,11 +293,36 @@ class Connection(
         var wrote = false
         while (!closed.get()) {
             val task = callWrites.poll() ?: break
+            val t0 = System.nanoTime()
             task.write(out)
             out.flush()
+            accountWritten(task.bytes, System.nanoTime() - t0)
             wrote = true
         }
         return wrote
+    }
+
+    /**
+     * 统计吞吐：**只累加真正在写的那段时间**。
+     *
+     * 关键点：不能用「墙钟时间」当分母 —— 链路空闲 5 秒后写 16 KB，
+     * 按墙钟算出来是 3 KB/s，会误判成「链路很差」，从而永远不敢下载。
+     * 这里累加每次 write 的耗时，算出来的是真实写入吞吐（goodput）。
+     * 写线程独有，无需加锁。
+     */
+    private fun accountWritten(bytes: Int, busyNs: Long) {
+        if (bytes <= 0) return
+        bytesWritten += bytes
+        windowBytes += bytes
+        windowBusyNs += busyNs
+        // 攒够 ~500ms 的忙碌时间才算一个样本
+        if (windowBusyNs >= MIN_SAMPLE_NS) {
+            val bps = windowBytes * 1_000_000_000L / windowBusyNs
+            writeBps = if (writeBps <= 0) bps else (writeBps * 7 + bps * 3) / 10 // α≈0.3
+            bpsFlow.value = writeBps
+            windowBytes = 0
+            windowBusyNs = 0
+        }
     }
 
     private suspend fun heartbeatLoop() {
@@ -376,4 +432,9 @@ class Connection(
     }
 
     private fun longToBytes(v: Long): ByteArray = ByteArray(8) { i -> (v ushr (56 - 8 * i)).toByte() }
+
+    private companion object {
+        /** 攒够这么多「忙碌纳秒」才算一个吞吐样本（约 500ms 的持续写入）。 */
+        const val MIN_SAMPLE_NS = 500_000_000L
+    }
 }

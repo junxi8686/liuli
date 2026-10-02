@@ -214,11 +214,19 @@ internal object MediaFiles {
         ""
     }
 
+    /**
+     * Writes [bytes] to [file], creating parent directories.
+     *
+     * A failed write removes what it left behind. With media now auto-accepted, a half-written
+     * thumbnail or payload must never survive looking like a complete file — and on a full disk
+     * that is the normal failure, not an exotic one.
+     */
     fun writeBytes(file: File, bytes: ByteArray): Boolean = try {
         file.parentFile?.mkdirs()
         file.writeBytes(bytes)
         true
     } catch (e: Exception) {
+        runCatching { file.delete() }
         false
     }
 

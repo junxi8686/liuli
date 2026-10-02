@@ -5,6 +5,7 @@ import com.liuli.btchat.bt.Connection
 import com.liuli.btchat.bt.Router
 import com.liuli.btchat.core.DeleteMessagePacket
 import com.liuli.btchat.core.Envelope
+import com.liuli.btchat.core.FileOfferPacket
 import com.liuli.btchat.core.GroupInvitePacket
 import com.liuli.btchat.core.GroupUpdatePacket
 import com.liuli.btchat.core.Packet
@@ -116,8 +117,9 @@ class RelayService(
         val msgId = relayMsgId(packet) ?: return 0
         val dests = destIds.filter { it.isNotBlank() && it != originId }.distinct()
         if (dests.isEmpty()) return 0
-        // 自己发出去的消息也要记进「见过」：它绕一圈回来时必须被丢掉（A→B→C→A 防环）
-        markSeen(msgId)
+        // 自己发出去的消息也要记进「见过」：它绕一圈回来时必须被丢掉（A→B→C→A 防环）。
+        // 同样按 (msgId, destId) 记，一条群消息可以合法地对应多个收件人。
+        for (dest in dests) markSeen(relayKey(msgId, dest))
         val payload = runCatching {
             Wire.encode(Envelope(from = originId, to = null, groupId = groupId, hop = 0, packet = packet))
                 .toString(Charsets.UTF_8)
@@ -162,11 +164,19 @@ class RelayService(
             return
         }
         if (p.destId == me) {
-            deliver(conn, p)
+            // 同一个收件人可能从多条路径各收到一份：只落库一次，但**每一条都要回执**，
+            // 否则另一条链路上的搬运工会一直留着这份缓存直到过期。
+            if (markSeen(relayKey(p.msgId, p.destId))) {
+                deliver(conn, p)
+            } else {
+                sendAck(conn, p.msgId, p.destId)
+            }
             return
         }
         // 我是中间人：**只保管，不显示、不入库**
-        if (!markSeen(p.msgId)) return // 已经见过 → 不再重复缓存 / 转发
+        // 去重键是 (msgId, destId)：一条群消息会给每个成员各发一个信封，
+        // 只用 msgId 去重会把第二个收件人的信封误吞掉。
+        if (!markSeen(relayKey(p.msgId, p.destId))) return
         val now = store.now()
         val entry = RelayEntry(
             msgId = p.msgId,
@@ -310,10 +320,13 @@ class RelayService(
         )
     }
 
+    /** 去重键：**(msgId, destId)** —— 一条消息对不同收件人是独立信封。 */
+    private fun relayKey(msgId: String, destId: String): String = "$msgId|$destId"
+
     /** 有界去重表：返回 true 表示第一次见到。 */
-    private fun markSeen(msgId: String): Boolean = synchronized(seenLock) {
-        if (seen.containsKey(msgId)) return@synchronized false
-        seen[msgId] = store.now()
+    private fun markSeen(key: String): Boolean = synchronized(seenLock) {
+        if (seen.containsKey(key)) return@synchronized false
+        seen[key] = store.now()
         if (seen.size > BtConstants.RELAY_SEEN_CAPACITY) {
             val it = seen.keys.iterator()
             if (it.hasNext()) {
@@ -337,6 +350,10 @@ class RelayService(
             is DeleteMessagePacket -> "delete:${packet.msgId}"
             is GroupUpdatePacket -> "gupdate:${packet.groupId}:${packet.revision}"
             is GroupInvitePacket -> "ginvite:${packet.groupId}"
+            // 媒体**只中转 OFFER（信封）**，不中转字节：对方连不上发送者也能知道
+            // 有一条图片/视频在等他，气泡与占位能正确显示；真正的分片等发送方
+            // 上线后直连下载（50MB 视频经中间人转发对三方都是灾难）。
+            is FileOfferPacket -> "foffer:${packet.transferId}"
             else -> null
         }
     }

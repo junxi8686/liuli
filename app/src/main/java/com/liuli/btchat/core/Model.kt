@@ -17,7 +17,31 @@ enum class ConvKind { DIRECT, GROUP }
 enum class Role { OWNER, ADMIN, MEMBER }
 
 /** Lifecycle of an attachment transfer. */
-enum class TransferState { IDLE, OFFERED, WAIT_ACCEPT, TRANSFERRING, DONE, FAILED, REJECTED, CANCELLED }
+enum class TransferState {
+    IDLE,
+    OFFERED,
+    WAIT_ACCEPT,
+
+    /**
+     * The link to whoever holds the bytes is too slow to be worth starting.
+     * Deliberately not FAILED: nothing has gone wrong, and the transfer resumes
+     * by itself once the link recovers — so the UI must say "waiting", never
+     * "failed".
+     */
+    WAITING_LINK,
+
+    /**
+     * The offer arrived (possibly relayed through several phones) but nobody
+     * currently online holds the bytes. Saying so beats pretending to download.
+     */
+    WAITING_SENDER,
+
+    TRANSFERRING,
+    DONE,
+    FAILED,
+    REJECTED,
+    CANCELLED
+}
 
 /** Where a peer came from — drives the badge shown in the list. */
 enum class PeerSource { BONDED, DISCOVERED, CONNECTED, SAVED }
@@ -192,7 +216,24 @@ data class Prefs(
     /** Material strength, 0…1 — scales blur radius, tint and shadow. */
     val glassIntensity: Float = 1f,
     /** 0 = 液态玻璃, 1 = 普通高斯模糊, 2 = 全部关闭. See `ui.glass.GlassMode`. */
-    val effectMode: Int = 1,
+    /**
+     * 0 = 液态玻璃, 1 = 高斯模糊, 2 = 全部关闭. See [GlassModeIds].
+     *
+     * **This default matters more than it looks.** `Settings.flow` starts as
+     * `MutableStateFlow(Prefs())` and the real values are only read in
+     * `ensureIdentity()`, which runs from a `LaunchedEffect` — i.e. *after* the
+     * first composition. So whatever is here is what the app draws its first
+     * frame with. At `1` the first frame ran with blur switched on, which made
+     * `GlassStage` record its content into a backdrop layer; the RenderThread
+     * died of a stack overflow in `RenderNode::prepareTreeImpl` (a node
+     * referencing itself) and the window never drew again — a white screen with
+     * a perfectly healthy UI thread, which is why the accessibility tree still
+     * showed every button.
+     *
+     * With `NONE` the first frame already skips the layer entirely and the
+     * settings file never has a chance to matter.
+     */
+    val effectMode: Int = GlassModeIds.NONE,
     val bubbleStyle: Int = 0,
     /** 0 = 跟随系统, 1 = 强制浅色, 2 = 强制深色. See `ui.glass.ThemeMode`. */
     val themeMode: Int = 0,
@@ -249,7 +290,14 @@ data class TransferProgress(
     val total: Long,
     val done: Long,
     val state: TransferState,
-    val error: String? = null
+    val error: String? = null,
+    /**
+     * Human-readable reason for a waiting state, e.g.
+     * 「链路太差（2 KB/s），稍后自动重试」. The UI shows this verbatim rather
+     * than inventing its own wording, so there is exactly one place that
+     * decides what the user is told.
+     */
+    val waitNote: String? = null
 ) {
     val fraction: Float get() = if (total <= 0L) 0f else (done.toFloat() / total).coerceIn(0f, 1f)
 }

@@ -310,9 +310,11 @@ class Router(
             for (t in route.targets.toList()) {
                 if (t === conn || t.isClosed) continue
                 if (route.accepted.isNotEmpty() && t.remoteId.isNotBlank() && t.remoteId !in route.accepted) continue
-                val task = Connection.WriteTask("relay-chunk:${chunk.seq}") { out ->
-                    Wire.writeChunk(out, chunk.transferId, chunk.seq, chunk.buf, chunk.offset, chunk.length)
-                }
+                val task = Connection.WriteTask(
+                    label = "relay-chunk:${chunk.seq}",
+                    write = { out -> Wire.writeChunk(out, chunk.transferId, chunk.seq, chunk.buf, chunk.offset, chunk.length) },
+                    bytes = chunk.length
+                )
                 if (t.tryEnqueue(task)) forwarded++
             }
             if (forwarded == 0 && route.targets.none { !it.isClosed }) relayRoutes.remove(chunk.transferId)
@@ -814,7 +816,7 @@ class Router(
         if (conv.kind == ConvKind.DIRECT) {
             val peer = resolvePeerId(conv.peerId ?: return 0)
             if (sendPacketTo(peer, null, packet)) return 1
-            return if (relayable && stashFor(convId, null, packet, listOf(peer))) 1 else 0
+            return if (relayable && stashFor(convId, null, packet, listOf(peer)) > 0) 1 else 0
         }
         val env = Envelope(from = me, to = null, groupId = convId, hop = 0, packet = packet)
         val members = store.members(convId).map { it.deviceId }

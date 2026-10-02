@@ -47,6 +47,18 @@ class MediaEstimatesTest {
         assertEquals(Int.MAX_VALUE, transferSeconds(Long.MAX_VALUE - 1L))
     }
 
+    @Test
+    fun `a measured rate replaces the nominal one`() {
+        // 1 MB: 7 s at the nominal 150 KB/s, 32 s at a measured 32 KB/s.
+        assertEquals(7, MediaEstimates.transferSeconds(1L * mb))
+        assertEquals(32, MediaEstimates.transferSeconds(1L * mb, 32L * 1024L))
+
+        // An unknown or nonsensical measurement falls back to the nominal rate, never to zero.
+        assertEquals(7, MediaEstimates.transferSeconds(1L * mb, 0L))
+        assertEquals(7, MediaEstimates.transferSeconds(1L * mb, -5L))
+        assertEquals(0, MediaEstimates.transferSeconds(0L, 4_000L))
+    }
+
     // --------------------------------------------------------- humanDuration
 
     @Test
