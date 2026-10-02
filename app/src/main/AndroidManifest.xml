@@ -1,0 +1,109 @@
+<?xml version="1.0" encoding="utf-8"?>
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- Bluetooth: classic (RFCOMM) + BLE for discovery of nearby devices -->
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- `neverForLocation` is not cosmetic. Without it the platform treats scan
+         results as location data and silently withholds ACTION_FOUND unless a
+         location permission is held **and** location services are on — which is
+         why 「搜索附近设备」 found nothing on Android 16 while reporting no error
+         at all. ACCESS_FINE_LOCATION is capped at API 32, so on a modern phone
+         this flag is the only thing that makes discovery work. -->
+    <uses-permission
+        android:name="android.permission.BLUETOOTH_SCAN"
+        android:usesPermissionFlags="neverForLocation"
+        tools:targetApi="s" />
+
+    <!-- Pre-Android-12 only: the platform required a location permission for
+         Bluetooth discovery, and we still ask for it there. -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" android:maxSdkVersion="32" />
+
+    <!-- Deliberately absent: INTERNET and NEARBY_WIFI_DEVICES. 琉璃 moves bytes
+         only over Bluetooth, so declaring INTERNET would make the installer
+         claim the app "can access the internet" while it never does. The
+         on-device self-test therefore runs over in-process pipes
+         (`core.MemoryDuplex`) rather than a loopback socket — Android requires
+         INTERNET even for 127.0.0.1, which is exactly how this was found. -->
+
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.VIBRATE" />
+
+    <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_VISUAL_USER_SELECTED" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+
+    <!-- Video calls. Android returns "denied" for an undeclared permission
+         *without showing a dialog*, so a `requestPermission(CAMERA)` call in the
+         UI silently did nothing until this line existed — that is exactly why
+         视频通话 had no picture. The features are `required="false"` so a device
+         without a camera is not filtered out of the store. -->
+    <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
+
+    <uses-feature android:name="android.hardware.bluetooth" android:required="false" />
+
+    <!-- Incoming calls must be answerable without opening the app.
+         `USE_FULL_SCREEN_INTENT` lets the call screen take over the lock screen
+         the way a phone call does; on Android 14+ it is granted at install time
+         for apps whose whole purpose is calling, and degrades to a heads-up
+         notification otherwise. Picture-in-picture is what keeps the remote
+         video alive when the user leaves the app mid-call — it needs no runtime
+         permission, only the activity attribute below. -->
+    <uses-permission android:name="android.permission.USE_FULL_SCREEN_INTENT" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+
+    <application
+        android:name=".LiuliApp"
+        android:allowBackup="true"
+        android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher_round"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:largeHeap="true"
+        android:enableOnBackInvokedCallback="true"
+        android:theme="@style/Theme.Liuli"
+        tools:targetApi="34">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true"
+            android:launchMode="singleTask"
+            android:windowSoftInputMode="adjustResize"
+            android:supportsPictureInPicture="true"
+            android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|smallestScreenSize|density"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
+            android:theme="@style/Theme.Liuli">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".bt.BluetoothChatService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/file_paths" />
+        </provider>
+    </application>
+</manifest>

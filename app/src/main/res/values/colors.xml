@@ -1,0 +1,6 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Matches LiuliColors.Bg, and is what the splash/starting window uses
+         before the first Compose frame is drawn. -->
+    <color name="liuli_bg">#FFF2F3F5</color>
+</resources>

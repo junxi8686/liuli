@@ -1,0 +1,31 @@
+# 构建产物
+#
+# 每个 agent/每次发布都会用 `-PliuliBuildDir=<名字>` 输出到一个独立目录，
+# 所以这里是 build* 而不是只有 build/ —— 否则几十个几百 MB 的目录会被提交上去。
+build/
+build-*/
+.pcache/
+.gradle/
+.kotlin/
+*.apk
+*.aab
+
+# 本机环境
+#
+# local.properties 里是这台机器上 Android SDK 的绝对路径，换台机器就是错的，
+# 本来也不该进版本库。
+local.properties
+.idea/
+*.iml
+.DS_Store
+
+# 验证与调试的临时产物
+#
+# docs/verify 里的截图是刻意保留的证据（README 会引用），.shots 和 .*test 是
+# 开发过程中的临时目录。
+.shots/
+.*-test/
+.liuli-*/
+
+# 崩溃日志
+hs_err_pid*.log
