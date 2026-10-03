@@ -39,12 +39,34 @@ android {
         versionName = liuliVersion.getProperty("versionName", "1.0")
     }
 
+    // 签名密钥**不进仓库**。
+    //
+    // 它们曾经是提交进来的（为了让别人能复现出可安装的包），但公开仓库里放私钥
+    // 和口令等于把「谁能发布能覆盖安装的琉璃更新」交出去：同一个包名，只有用同一
+    // 把密钥签的包才装得上去。演示项目的可复现性不值这个价。
+    //
+    // 本地构建照旧：`keystore/liuli-release.jks` 和 `keystore/keystore.properties`
+    // 都在 .gitignore 里。两者齐备就签名，缺任一个就产出未签名包 —— 构建不会失败，
+    // 只是 `assembleRelease` 出来的 APK 需要你自己签。
+    val keystorePropsFile = rootProject.file("keystore/keystore.properties")
+    val keystoreFile = rootProject.file("keystore/liuli-release.jks")
+    val signingProps = if (keystoreFile.exists() && keystorePropsFile.exists()) {
+        // `Properties()` 直接用，不要写 `java.util.Properties()` —— 在 Gradle 的
+        // Kotlin 脚本里 `java` 已经被解析成 Gradle 的 java 扩展，全限定名会
+        // "Unresolved reference 'util'"。
+        Properties().apply { keystorePropsFile.inputStream().use { load(it) } }
+    } else {
+        null
+    }
+
     signingConfigs {
-        create("liuli") {
-            storeFile = file("../keystore/liuli-release.jks")
-            storePassword = "liuli2026"
-            keyAlias = "liuli"
-            keyPassword = "liuli2026"
+        if (signingProps != null) {
+            create("liuli") {
+                storeFile = keystoreFile
+                storePassword = signingProps.getProperty("storePassword")
+                keyAlias = signingProps.getProperty("keyAlias", "liuli")
+                keyPassword = signingProps.getProperty("keyPassword")
+            }
         }
     }
 
@@ -54,7 +76,7 @@ android {
             // the unused halves of Compose/Media3, which is most of the APK.
             isMinifyEnabled = true
             isShrinkResources = true
-            signingConfig = signingConfigs.getByName("liuli")
+            signingConfig = signingProps?.let { signingConfigs.getByName("liuli") }
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),
                 "proguard-rules.pro"
