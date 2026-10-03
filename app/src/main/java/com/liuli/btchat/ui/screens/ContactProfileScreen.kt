@@ -1,6 +1,8 @@
 package com.liuli.btchat.ui.screens
 
 import android.content.Context
+import android.content.Intent
+import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -94,7 +96,7 @@ fun ContactProfileScreen(
     var remarkOpen by remember { mutableStateOf(false) }
     var confirmDelete by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
-    var blocked by remember { mutableStateOf(isContactBlocked(context, deviceId)) }
+    // 拉黑已整体移除，见下方「隐私」位置的说明。
     var notice by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(revision, deviceId) {
@@ -193,13 +195,6 @@ fun ContactProfileScreen(
                             color = if (data?.online == true) LiuliColors.Success else LiuliColors.TextTertiary,
                             style = MaterialTheme.typography.bodySmall
                         )
-                        if (blocked) {
-                            Text(
-                                "已加入黑名单（本地标记）",
-                                color = LiuliColors.Danger,
-                                style = MaterialTheme.typography.labelMedium
-                            )
-                        }
                         Row(
                             Modifier.fillMaxWidth(),
                             horizontalArrangement = Arrangement.spacedBy(10.dp),
@@ -297,28 +292,13 @@ fun ContactProfileScreen(
                     }
                 }
 
-                item(key = "privacy") {
-                    GroupLabel("隐私")
-                    SettingsCard {
-                        SwitchRow(
-                            icon = LiuliIcons.Lock,
-                            label = "加入黑名单",
-                            // This used to promise "本地标记，未同步对端：对方仍能发
-                            // 消息", which stopped being true once the transport
-                            // started enforcing the block. Blocking is one-way
-                            // and real now: you can still send to them, and
-                            // everything they send is dropped before it reaches
-                            // the store — their client shows it as rejected.
-                            subtitle = "对方发来的消息会被直接丢弃，他那边会显示发送失败；你仍然可以发给他",
-                            checked = blocked,
-                            enabled = true
-                        ) { on ->
-                            blocked = on
-                            setContactBlocked(context, deviceId, on)
-                            notice = if (on) "已加入黑名单，对方将发不进来" else "已移出黑名单"
-                        }
-                    }
-                }
+                // 拉黑功能已整体移除 —— 用户的要求，理由也成立：
+                //
+                // 「配对即好友」之后，拉黑只是在本机丢包，对方那边显示发送失败，
+                // 但他随时可以在系统蓝牙里解除配对再重新配对，一配对上就又成了
+                // 好友、又能发消息。一个绕得过去的开关比没有这个开关更糟：用户
+                // 以为拉黑了，其实没有。真正有效的手段是解除配对（下面的
+                // 「删除好友」就是干这个的），所以我们不再提供前者。
 
                 item(key = "actions") {
                     GroupLabel("操作")
@@ -334,6 +314,7 @@ fun ContactProfileScreen(
                         SettingRow(
                             icon = LiuliIcons.Logout,
                             label = "删除好友",
+                            value = "并解除蓝牙配对",
                             tint = LiuliColors.Danger,
                             labelColor = LiuliColors.Danger,
                             showChevron = false
@@ -356,14 +337,36 @@ fun ContactProfileScreen(
             GlassConfirmDialog(
                 visible = confirmDelete,
                 title = "删除好友",
-                message = "「$display」会从通讯录移除，已有的聊天记录仍然保留在本机。",
-                confirmText = "删除",
+                // Under 「配对即好友」 a contact row alone is not enough: the next
+                // time the two phones see each other the bond re-creates it. The
+                // system pairing is the real relationship, so deleting has to
+                // end there — and an app cannot unpair a device, only the
+                // Bluetooth settings can.
+                message = "「$display」会从通讯录移除，聊天记录保留在本机。\n\n" +
+                    "你们仍然是蓝牙配对状态，下次靠近还会自动连接并重新成为好友。" +
+                    "要真正断开，请在弹出的蓝牙设置里「取消配对」。",
+                confirmText = "删除并去配对设置",
                 destructive = true,
                 onDismiss = { confirmDelete = false },
                 onConfirm = {
                     confirmDelete = false
+                    val address = contact?.address.orEmpty()
                     scope.launch {
                         withContext(Dispatchers.IO) { Svc.store.deleteContact(deviceId) }
+                        // Take the user where the decision actually lives.
+                        // `removeBond` is a system-privileged call, so the best
+                        // an app may do is open the page.
+                        val opened = runCatching {
+                            val intent = Intent(Settings.ACTION_BLUETOOTH_SETTINGS)
+                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            context.startActivity(intent)
+                            true
+                        }.getOrDefault(false)
+                        notice = if (opened) {
+                            "请在蓝牙设置里取消配对：$display"
+                        } else {
+                            "已从通讯录移除；请到系统蓝牙设置里取消配对"
+                        }
                         onBack()
                     }
                 }
@@ -664,35 +667,4 @@ private fun ProfileNotice(message: String?, onGone: () -> Unit) {
             }
         }
     }
-}
-
-// ---------------------------------------------------------------- local block
-
-private const val BlockPrefs = "liuli_blocked"
-
-/**
- * 拉黑 lives in local preferences, but its effect does not stop here.
- *
- * `Di` hands this list to the transport, which drops anything an inbound
- * connection sends from a blocked device and tells the sender it was rejected —
- * so the switch is one-way enforcement, not a label. This file only owns the
- * storage; the policy is in `bt/Router`.
- */
-internal fun isContactBlocked(context: Context, deviceId: String): Boolean =
-    context.getSharedPreferences(BlockPrefs, Context.MODE_PRIVATE)
-        .getStringSet("ids", emptySet())
-        ?.contains(deviceId) == true
-
-/** The whole local block list, so a list screen can tag its rows in one read. */
-internal fun blockedContacts(context: Context): Set<String> =
-    context.getSharedPreferences(BlockPrefs, Context.MODE_PRIVATE)
-        .getStringSet("ids", emptySet())
-        .orEmpty()
-        .toSet()
-
-internal fun setContactBlocked(context: Context, deviceId: String, blocked: Boolean) {
-    val prefs = context.getSharedPreferences(BlockPrefs, Context.MODE_PRIVATE)
-    val current = prefs.getStringSet("ids", emptySet()).orEmpty().toMutableSet()
-    if (blocked) current.add(deviceId) else current.remove(deviceId)
-    prefs.edit().putStringSet("ids", current).apply()
 }

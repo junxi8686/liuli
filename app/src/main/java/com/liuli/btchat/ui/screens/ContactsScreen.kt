@@ -102,7 +102,6 @@ fun ContactsScreen(
     var groups by remember { mutableStateOf<List<GroupUi>>(emptyList()) }
     var contacts by remember { mutableStateOf<List<ContactUi>>(emptyList()) }
     var unread by remember { mutableStateOf(0) }
-    var blockedIds by remember { mutableStateOf(emptySet<String>()) }
     var loaded by remember { mutableStateOf(false) }
 
     var profileOpen by remember { mutableStateOf(false) }
@@ -120,7 +119,6 @@ fun ContactsScreen(
         groups = snapshot.groups
         contacts = snapshot.contacts
         unread = snapshot.unread
-        blockedIds = withContext(Dispatchers.IO) { blockedContacts(context) }
         loaded = true
     }
 
@@ -255,8 +253,7 @@ fun ContactsScreen(
                         name = item.contact.display,
                         seed = item.contact.avatarSeed,
                         remark = item.contact.name.takeIf { item.contact.remark.isNotBlank() },
-                        subtitle = item.subtitle +
-                            if (item.contact.deviceId in blockedIds) " · 已拉黑" else "",
+                        subtitle = item.subtitle,
                         online = item.online,
                         onClick = {
                         // WeChat behaviour: a contact in the address book opens

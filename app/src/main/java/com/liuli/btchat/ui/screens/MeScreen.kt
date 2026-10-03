@@ -79,22 +79,6 @@ fun MeScreen(
     // 我的资料 lives here now; 设置 no longer carries a copy of it.
     var profileOpen by remember { mutableStateOf(false) }
 
-    ProfileSheet(
-        visible = profileOpen,
-        prefs = prefs,
-        // Without these two the sheet fell back to its `= 0` defaults, so the
-        // 会话 / 联系人 tiles read 0 / 0 no matter how much was on the phone —
-        // which looks exactly like data loss. Every other entry point into this
-        // sheet passes real numbers; this one was the only one that did not.
-        conversationCount = conversations,
-        contactCount = contacts,
-        onDismiss = { profileOpen = false },
-        onApply = { name, status, seed ->
-            Svc.settings.edit { it.copy(myName = name, myStatus = status, myAvatarSeed = seed) }
-            profileOpen = false
-        }
-    )
-
     LiuliScaffold(
         content = {
             LazyColumn(
@@ -187,6 +171,27 @@ fun MeScreen(
                     badgeFor = { if (it == 0) unread else 0 }
                 )
             }
+        }
+    )
+
+    // **After** the scaffold, not before.
+    //
+    // The sheet is a plain overlay, so whatever is composed later draws on top
+    // of it. Declared first it sat underneath the whole page: tapping 昵称/状态
+    // did set `profileOpen`, the sheet composed, and the user saw nothing at all
+    // — the two rows looked dead.
+    ProfileSheet(
+        visible = profileOpen,
+        prefs = prefs,
+        // Without these two the sheet fell back to its `= 0` defaults, so the
+        // 会话 / 联系人 tiles read 0 / 0 no matter how much was on the phone —
+        // which looks exactly like data loss.
+        conversationCount = conversations,
+        contactCount = contacts,
+        onDismiss = { profileOpen = false },
+        onApply = { name, status, seed ->
+            Svc.settings.edit { it.copy(myName = name, myStatus = status, myAvatarSeed = seed) }
+            profileOpen = false
         }
     )
 }
