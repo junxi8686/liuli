@@ -206,7 +206,7 @@ object Engine : ChatEngine {
             scope = scope,
             peers = { bondedFriendPeers() },
             isConnected = { id -> id.isNotBlank() && isConnected(id) },
-            connect = { peer -> connect(peer) },
+            connect = { peer -> connect(peer, automatic = true) },
             busy = {
                 callState.value.busy ||
                     transferState.value.any { it.state == com.liuli.btchat.core.TransferState.TRANSFERRING }
@@ -246,9 +246,49 @@ object Engine : ChatEngine {
         if (!Svc.installed) return emptyList()
         val contacts = runCatching { Svc.store.contacts() }.getOrDefault(emptyList())
         val byAddress = contacts.filter { it.address.isNotBlank() }.associateBy { it.address }
-        return bondedPeers.filter { it.address.isNotBlank() }.map { p ->
-            p.copy(deviceId = byAddress[p.address]?.deviceId.orEmpty())
+        return bondedPeers.filter { it.address.isNotBlank() }
+            .filter { p -> worthDialling(p.address, byAddress[p.address]) }
+            .map { p ->
+                // A known contact contributes its deviceId; a stranger's is
+                // unknown until HELLO, which is fine — `connect` resolves it.
+                p.copy(deviceId = byAddress[p.address]?.deviceId.orEmpty())
+            }
+    }
+
+    /**
+     * 值不值得自动去拨。
+     *
+     * 蓝牙的配对列表里坐着一堆**永远不可能运行琉璃**的东西 —— 耳机、手表、车机。
+     * 「配对即好友」把这些也变成了好友之后，自动连接就去轮番拨打它们，用户看到的
+     * 是一串「连接失败: read failed, socket might closed」。那不是错误，那是这个
+     * 应用在敲一扇不存在的门。
+     *
+     * 两个信号，满足其一即可：
+     * * **已经握手过** —— 联系人行里的 deviceId 与 address 不同，说明对方真的回
+     *   过 HELLO、报过自己的 UUID。这是最硬的证据，不需要新增任何状态。
+     * * **设备大类像手机或电脑** —— 覆盖「刚配对好、还没聊过」的新手机，这正是
+     *   用户要的「配对了就自动连」。耳机是 AUDIO_VIDEO、手表是 WEARABLE，都挡在
+     *   外面；大类读不到时按 UNCATEGORIZED 放行，宁可多试一次也不要把新手机漏掉。
+     */
+    private fun worthDialling(address: String, contact: com.liuli.btchat.core.Contact?): Boolean {
+        if (contact != null && contact.deviceId.isNotBlank() &&
+            contact.deviceId != contact.address
+        ) {
+            return true
         }
+        return runCatching {
+            val adapter = appCtx()
+                ?.getSystemService(android.bluetooth.BluetoothManager::class.java)
+                ?.adapter ?: return@runCatching true
+            val major = adapter.getRemoteDevice(address).bluetoothClass?.majorDeviceClass
+                ?: return@runCatching true
+            when (major) {
+                android.bluetooth.BluetoothClass.Device.Major.PHONE,
+                android.bluetooth.BluetoothClass.Device.Major.COMPUTER -> true
+                android.bluetooth.BluetoothClass.Device.Major.UNCATEGORIZED -> true
+                else -> false
+            }
+        }.getOrDefault(true)
     }
 
     /**
@@ -383,7 +423,20 @@ object Engine : ChatEngine {
 
     // ------------------------------------------------------------------ 连接
 
-    override fun connect(peer: Peer): Boolean {
+    override fun connect(peer: Peer): Boolean = connect(peer, automatic = false)
+
+    /**
+     * @param automatic true when [AutoConnector] is dialling on its own behalf.
+     *
+     * Auto-connect deliberately keeps its failures to itself. It retries every
+     * 15–120s for as long as the other phone is merely out of range, and the
+     * user sees none of that intent — what they saw was a stream of
+     * 「连接失败」 for a phone that was simply in another room, and for a pair of
+     * earbuds that can never run this app at all. A background retry that has not
+     * been asked for by anyone must not report its failures; only a connection
+     * the user actually requested deserves an error.
+     */
+    fun connect(peer: Peer, automatic: Boolean): Boolean {
         if (!started) start()
         val ctx = appCtx() ?: return false
         val t = transport ?: return false
@@ -399,7 +452,7 @@ object Engine : ChatEngine {
         if (peer.deviceId.isNotBlank() && router.isOnline(peer.deviceId)) return true
         if (router.connectionForAddress(address) != null) return true
 
-        publish(LinkState.CONNECTING, "正在连接 ${peer.name.ifBlank { address }}…")
+        if (!automatic) publish(LinkState.CONNECTING, "正在连接 ${peer.name.ifBlank { address }}…")
         scope.launch {
             runCatching { t.open(address) }
                 .onSuccess { link ->
@@ -409,6 +462,11 @@ object Engine : ChatEngine {
                 .onFailure { e ->
                     // 引擎已经停了就别再写回一条「连接失败」，那会覆盖掉停机后的正常状态
                     if (!started) return@onFailure
+                    if (automatic) {
+                        // 后台重试失败只回到「未连接」，不报错、不打扰。
+                        refreshLink()
+                        return@onFailure
+                    }
                     errorMessage = "连接失败: ${e.message ?: "未知错误"}"
                     logNotice(errorMessage!!)
                     refreshLink()

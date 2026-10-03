@@ -31,6 +31,9 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <!-- 手机重启后把前台服务拉回来。没有它，用户不打开应用就收不到任何消息或
+         来电，而且没有任何提示说明为什么。 -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.VIBRATE" />
 
@@ -102,6 +105,19 @@
         <receiver
             android:name=".data.CallActionReceiver"
             android:exported="false" />
+
+        <!-- 重启后 / 应用被更新后自动恢复链路。`MY_PACKAGE_REPLACED` 那条正是为
+             了「刚装完包，应用被系统强制停止」的情况 —— 否则用户会以为收不到
+             消息是别的原因。 -->
+        <receiver
+            android:name=".bt.BootReceiver"
+            android:exported="true"
+            android:directBootAware="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
 
         <service
             android:name=".bt.BluetoothChatService"
