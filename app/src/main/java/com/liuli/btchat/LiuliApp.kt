@@ -3,7 +3,12 @@ package com.liuli.btchat
 import android.app.Activity
 import android.app.Application
 import android.os.Bundle
+import com.liuli.btchat.bt.Engine
 import com.liuli.btchat.core.Svc
+import com.liuli.btchat.data.CallNotifier
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
 
 class LiuliApp : Application() {
 
@@ -11,6 +16,14 @@ class LiuliApp : Application() {
         super.onCreate()
         instance = this
         Di.install(this)
+
+        // 来电提醒挂在进程作用域上，而不是某个界面的作用域：它必须在应用被切到
+        // 后台、甚至界面被销毁时照样工作 —— 那正是它存在的理由。
+        CallNotifier.install(
+            this,
+            CoroutineScope(SupervisorJob() + Dispatchers.Default),
+            Engine.call
+        )
 
         // Foreground tracking, used to keep the app quiet about a message that
         // arrives in the conversation already on screen. A started-activity

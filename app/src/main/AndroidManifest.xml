@@ -81,17 +81,27 @@
             android:launchMode="singleTask"
             android:windowSoftInputMode="adjustResize"
             android:supportsPictureInPicture="true"
+            android:showWhenLocked="true"
+            android:turnScreenOn="true"
             android:configChanges="orientation|screenSize|screenLayout|keyboardHidden|uiMode|smallestScreenSize|density"
             android:theme="@style/Theme.Liuli">
-            <!-- `showWhenLocked` / `turnScreenOn` were here for the full-screen
-                 incoming-call UI. That UI does not exist yet (task-22), and the
-                 two attributes change how the launch window is presented, so
-                 they are removed until there is something that needs them. -->
+            <!-- `showWhenLocked` / `turnScreenOn` are back, and now something
+                 actually needs them: `CallNotifier` posts a full-screen intent
+                 来电通知, and without these two the activity would be pushed
+                 behind the keyguard — the call would ring on the lock screen and
+                 still be unanswerable. They were removed earlier precisely
+                 because that UI did not exist yet. -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <!-- 来电通知上的「接听 / 挂断」。必须在清单里注册：用户可能在通话界面
+             之外、甚至在锁屏上按这两个按钮，那时进程里没有活着的 Activity。 -->
+        <receiver
+            android:name=".data.CallActionReceiver"
+            android:exported="false" />
 
         <service
             android:name=".bt.BluetoothChatService"
