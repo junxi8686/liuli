@@ -67,6 +67,18 @@ object Store : ChatStore {
     internal val persistenceError: String?
         get() = error
 
+    /**
+     * Surfaces the degradation to the UI. `persistenceError` and
+     * `usingMemoryFallback` both existed but had no reader anywhere, so a phone
+     * whose database failed to open showed an empty app with a fresh identity
+     * and nothing at all explaining it — indistinguishable from「聊天记录全没了」.
+     */
+    override val persistenceWarning: String?
+        get() = if (!usingMemoryFallback) null else buildString {
+            append("无法读写本地数据库，本次运行的聊天记录只保存在内存里，退出应用后会丢失。")
+            error?.takeIf { it.isNotBlank() }?.let { append("（原因：").append(it).append("）") }
+        }
+
     // ------------------------------------------------------------ plumbing
 
     private fun bump() {

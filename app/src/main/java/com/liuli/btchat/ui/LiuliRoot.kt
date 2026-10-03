@@ -23,12 +23,15 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -43,6 +46,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.zIndex
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
@@ -176,6 +180,36 @@ fun LiuliRoot() {
         // 不够就单栏 —— 两种情况都不会出现「叠两层」或错位。
         BoxWithConstraints(Modifier.fillMaxSize()) {
             val wide = maxWidth >= WideBreakpoint
+
+            // 存储坏了要说出来。
+            //
+            // 数据库打不开时 `Store` 会退化成内存实现让界面继续可用 —— 这是对的，
+            // 但退化之后的应用**看起来就是一个全新的空应用**：没有会话、没有联系
+            // 人、身份也是新生成的。用户唯一的结论是「我的聊天记录全没了」，而
+            // 磁盘上的数据其实还在。所以这条横幅不是装饰，它是唯一能把这个误会
+            // 挡下来的东西。
+            val warning = Svc.store.persistenceWarning
+            if (warning != null) {
+                Box(
+                    Modifier
+                        .align(Alignment.TopCenter)
+                        // 必须显式压在上层。横幅写在内容**之前**，而 Compose 是后
+                        // 组合的盖在上面 —— 不加这一行，它会被下面那个不透明的
+                        // 主界面整块盖住。这正是白屏那个 bug 的形状，不想再犯
+                        // 一次：任何「先写、但想显示在上面」的元素都要说清楚层级。
+                        .zIndex(1f)
+                        .fillMaxWidth()
+                        .background(LiuliColors.Danger)
+                        .statusBarsPadding()
+                        .padding(horizontal = 16.dp, vertical = 8.dp)
+                ) {
+                    Text(
+                        warning,
+                        color = LiuliColors.TextOnAccent,
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                }
+            }
 
             /**
              * 从左侧列表打开一个会话。

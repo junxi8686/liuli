@@ -17,6 +17,19 @@ interface ChatStore {
     /** Bumped after any write, so Compose screens can re-read cheaply. */
     val revision: StateFlow<Long>
 
+    /**
+     * 非空表示**持久化已经失效**：写入只留在内存里，重启就没了。
+     *
+     * 这个提示必须显示给用户。存储层在数据库打不开时会退化成内存实现，让界面
+     * 继续可用 —— 这个设计本身是对的，但退化之后应用看起来**和一个刚装好、
+     * 什么都没有的应用完全一样**：没有会话、没有联系人、身份是新的。用户看到
+     * 的结论只会是「我的聊天记录全没了」，而且没有任何东西告诉他这只是暂时的、
+     * 数据其实还在磁盘上。
+     *
+     * 默认 null，所以只有真正会退化的实现需要覆写它。
+     */
+    val persistenceWarning: String? get() = null
+
     fun conversations(): List<Conversation>
     fun conversation(id: String): Conversation?
     fun saveConversation(c: Conversation)
