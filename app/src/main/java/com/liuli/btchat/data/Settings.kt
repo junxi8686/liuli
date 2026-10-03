@@ -171,7 +171,8 @@ object Settings : SettingsApi {
             // the stored value would resurrect the blur for anyone who had
             // picked it before the switch was deleted, so a phone that upgrades
             // would look different from a fresh install for no visible reason.
-            effectMode = GlassModeIds.NONE,            themeMode = sp.int(KEY_THEME, defaults.themeMode),
+            effectMode = GlassModeIds.NONE,
+            themeMode = sp.int(KEY_THEME, defaults.themeMode),
             bubbleStyle = sp.int(KEY_BUBBLE, defaults.bubbleStyle),
             darkMode = sp.flag(KEY_DARK, defaults.darkMode),
             blurRadius = sp.real(KEY_BLUR, defaults.blurRadius),
