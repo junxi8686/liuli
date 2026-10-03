@@ -219,7 +219,13 @@ object Engine : ChatEngine {
         autoConnector = connector
         // 扫描里出现的已配对设备 = 对方就在附近，立刻连，不用等下一轮
         d.onPeerFound = { peer ->
-            if (peer.address.isNotBlank() && bondedFriendPeers().any { it.address == peer.address }) {
+            // Kick against the in-memory bonded list, not `bondedFriendPeers()`.
+            //
+            // This callback fires once per discovered device, and the old call
+            // did a full contacts-table read every time. It does not need that
+            // precision either: the kick only asks the connector to run a tick,
+            // and the tick applies the real filter itself.
+            if (peer.address.isNotBlank() && bondedPeers.any { it.address == peer.address }) {
                 connector.kick()
             }
         }
@@ -818,6 +824,21 @@ object Engine : ChatEngine {
         attached.entries.removeAll { it.value.isClosed }
         val merged = LinkedHashMap<String, Peer>()
 
+        // 联系人表**整表只读一次**。
+        //
+        // 此前 `contactIdFor` 每查一个地址就调一次 `Svc.store.contacts()`，而
+        // `rebuildPeers()` 又在**每个扫描结果**上跑一次（见 `discovered.collect`）。
+        // 于是开销是「设备数 × 扫描事件数」次全表扫描，每次都要把所有联系人行
+        // 反序列化一遍 —— 扫描期间结果刷得很快，这就是「搜索附近设备」时界面发卡
+        // 的来源。一次读表 + 建索引之后，每个地址的查找是常数时间。
+        val contacts = if (Svc.installed) {
+            runCatching { Svc.store.contacts() }.getOrDefault(emptyList())
+        } else {
+            emptyList()
+        }
+        val contactsByAddress = contacts.filter { it.address.isNotBlank() }.associateBy { it.address }
+        fun contactIdFor(address: String): String = contactsByAddress[address]?.deviceId.orEmpty()
+
         // 1) 已连接（最权威，带上了真实 deviceId）
         for (l in linkSnapshotSafe()) {
             val key = l.address.ifBlank { l.deviceId }
@@ -853,19 +874,17 @@ object Engine : ChatEngine {
             )
         }
         // 4) 曾经连过、存过 MAC 的联系人（不在附近也能主动连）
-        if (Svc.installed) {
-            for (c in Svc.store.contacts()) {
-                val addr = c.address
-                if (addr.isBlank() || merged.containsKey(addr)) continue
-                merged[addr] = Peer(
-                    address = addr,
-                    deviceId = c.deviceId,
-                    name = c.display,
-                    avatarSeed = c.avatarSeed,
-                    source = PeerSource.SAVED,
-                    lastSeen = c.lastSeen
-                )
-            }
+        for (c in contacts) {
+            val addr = c.address
+            if (addr.isBlank() || merged.containsKey(addr)) continue
+            merged[addr] = Peer(
+                address = addr,
+                deviceId = c.deviceId,
+                name = c.display,
+                avatarSeed = c.avatarSeed,
+                source = PeerSource.SAVED,
+                lastSeen = c.lastSeen
+            )
         }
         peerState.value = merged.values.sortedWith(
             compareByDescending<Peer> { it.connected }.thenByDescending { it.source == PeerSource.BONDED }
