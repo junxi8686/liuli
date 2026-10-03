@@ -576,7 +576,21 @@ internal class LiuliDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, nu
     }
 
     fun deleteMessage(id: String) {
-        writableDatabase.delete(T_MESSAGES, "id = ?", arrayOf(id))
+        val db = writableDatabase
+        db.beginTransaction()
+        try {
+            // Read the conversation first: after the delete there is no row left
+            // to tell us which chat to recompute, and `recallMessage` already
+            // refreshes the preview while this path did not — so deleting the
+            // newest message left the chat list showing text that was gone.
+            val convId = db.query(T_MESSAGES, arrayOf("conv_id"), "id = ?", arrayOf(id), null, null, null)
+                .use { c -> if (c.moveToFirst()) c.getString(0) else null }
+            db.delete(T_MESSAGES, "id = ?", arrayOf(id))
+            if (convId != null) refreshPreviewForConv(db, convId)
+            db.setTransactionSuccessful()
+        } finally {
+            db.endTransaction()
+        }
     }
 
     fun setMessageState(id: String, state: MsgState) {
@@ -705,6 +719,19 @@ internal class LiuliDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, nu
     private fun refreshConversationPreview(db: SQLiteDatabase, messageId: String) {
         val convId = db.query(T_MESSAGES, arrayOf("conv_id"), "id = ?", arrayOf(messageId), null, null, null)
             .use { c -> if (c.moveToFirst()) c.getString(0) else null } ?: return
+        refreshPreviewForConv(db, convId)
+    }
+
+    /**
+     * Recomputes a conversation's preview from whatever messages are left.
+     *
+     * Split out from [refreshConversationPreview] because a *deleted* message
+     * cannot be looked up any more: the caller has to grab the conv id before
+     * the row goes. And when the deleted message was the only one, there is no
+     * "latest" to read — the preview has to be cleared explicitly, otherwise a
+     * chat with no messages keeps advertising the last one that was removed.
+     */
+    private fun refreshPreviewForConv(db: SQLiteDatabase, convId: String) {
         val latest = db.query(
             T_MESSAGES,
             MSG_COLUMNS,
@@ -714,10 +741,10 @@ internal class LiuliDb(context: Context) : SQLiteOpenHelper(context, DB_NAME, nu
             null,
             "sent_at DESC, rowid DESC",
             "1"
-        ).use { c -> if (c.moveToFirst()) readMessage(c) else null } ?: return
+        ).use { c -> if (c.moveToFirst()) readMessage(c) else null }
         db.update(
             T_CONVERSATIONS,
-            ContentValues().apply { put("last_preview", latest.preview) },
+            ContentValues().apply { put("last_preview", latest?.preview ?: "") },
             "id = ?",
             arrayOf(convId)
         )

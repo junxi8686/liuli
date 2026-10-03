@@ -226,15 +226,58 @@ object Engine : ChatEngine {
         connector.start()
     }
 
-    /** 已配对 且 已是好友（联系人表里有这个 MAC）的设备。 */
+    /**
+     * 已配对的设备 —— 全部都算好友。
+     *
+     * The user's rule, verbatim: 「只要配对上，就是直接相当于是加了好友」.
+     *
+     * This started as "bonded **and** in the contact list", which deadlocked the
+     * whole app: the friend gate turns a message from a non-friend into a friend
+     * *request*, and a request can only be delivered once a link exists — so
+     * requiring friendship before connecting meant a phone with no contacts
+     * could never connect, never exchange a request, and never become friends.
+     * Nothing worked and nothing said why.
+     *
+     * Pairing is the consent step now. It happens in the system's Bluetooth
+     * settings, both people take part in it, and it survives reboots — a better
+     * trust signal than a flag this app invented.
+     */
     private fun bondedFriendPeers(): List<Peer> {
         if (!Svc.installed) return emptyList()
         val contacts = runCatching { Svc.store.contacts() }.getOrDefault(emptyList())
-        if (contacts.isEmpty()) return emptyList()
         val byAddress = contacts.filter { it.address.isNotBlank() }.associateBy { it.address }
-        return bondedPeers.filter { p ->
-            p.address.isNotBlank() && byAddress.containsKey(p.address)
-        }.map { p -> p.copy(deviceId = byAddress[p.address]?.deviceId.orEmpty()) }
+        return bondedPeers.filter { it.address.isNotBlank() }.map { p ->
+            p.copy(deviceId = byAddress[p.address]?.deviceId.orEmpty())
+        }
+    }
+
+    /**
+     * Writes a contact row for every paired device, so 「配对即好友」 is true the
+     * moment the app starts rather than only once a message happens to arrive.
+     *
+     * Existing rows are left alone apart from their address, so a remark the
+     * user set is never overwritten.
+     */
+    private fun adoptBondedPeers() {
+        if (!Svc.installed) return
+        runCatching {
+            val existing = Svc.store.contacts()
+            bondedPeers.filter { it.address.isNotBlank() }.forEach { p ->
+                val known = existing.firstOrNull { it.address == p.address }
+                val now = System.currentTimeMillis()
+                Svc.store.saveContact(
+                    com.liuli.btchat.core.Contact(
+                        deviceId = known?.deviceId?.takeIf { it.isNotBlank() } ?: p.address,
+                        name = known?.name?.takeIf { it.isNotBlank() } ?: p.name,
+                        remark = known?.remark.orEmpty(),
+                        address = p.address,
+                        avatarSeed = known?.avatarSeed ?: p.name.hashCode(),
+                        addedAt = known?.addedAt ?: now,
+                        lastSeen = known?.lastSeen ?: 0L
+                    )
+                )
+            }
+        }
     }
 
     private fun screenInteractive(): Boolean = runCatching {
@@ -332,6 +375,9 @@ object Engine : ChatEngine {
         }
         val d = discovery ?: BtDiscovery(ctx).also { discovery = it }
         bondedPeers = d.bondedPeers()
+        // 配对即好友：每次刷新配对列表都把新配对的设备写进联系人表，
+        // 否则「已配对但没聊过」的设备不会出现在通讯录里，也发不出消息。
+        adoptBondedPeers()
         rebuildPeers()
     }
 

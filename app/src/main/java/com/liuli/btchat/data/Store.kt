@@ -443,7 +443,18 @@ internal object MemoryFallback : ChatStore {
     }
 
     override fun deleteMessage(id: String) {
+        // Mirror `LiuliDb.deleteMessage`: recompute the chat list entry, and
+        // clear it outright when the deleted message was the last one. Without
+        // this the two backends disagree — the SQLite one refreshes, the memory
+        // one does not — and a chat with no messages keeps showing the text of
+        // the message that was just removed.
+        val convId = msgs[id]?.convId
         msgs.remove(id)
+        if (convId != null) {
+            convs[convId]?.let { c ->
+                convs[convId] = c.copy(lastPreview = latestMessage(convId)?.preview ?: "")
+            }
+        }
         bump()
     }
 

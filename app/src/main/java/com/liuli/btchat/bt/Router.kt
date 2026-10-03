@@ -271,8 +271,10 @@ class Router(
             // 同一台设备重复连接：保留新链路
             previous.close("重复连接，已替换")
         }
-        // 只刷新**已存在**的联系人，绝不因为连上就自动加好友 ——
-        // 否则「删除好友」会在下次重连时被悄悄恢复（用户实测就是这个问题）。
+        // 刷新联系人：按 deviceId，找不到就按配对 MAC 兜底（并把行迁移到真实
+        // deviceId）。联系人**不会**在这里凭空创建 —— 新建联系人是「配对即好友」
+        // 的职责（`Engine.adoptBondedPeers`），它依据的是系统级的配对状态，而不是
+        // 「谁连上了我」。两者分开，才不会出现「删了好友、下次重连又被加回来」。
         refreshKnownContact(conn)
         migrateDirectConv(conn.address, id)
         // 新链路 = 一个新的搬运机会：把手上替别人保管的信封全量推给它
@@ -573,7 +575,22 @@ class Router(
                 }
                 store.deleteMessage(p.msgId)
             }
-            is FileOfferPacket -> tm?.onOffer(conn, env, p)
+            is FileOfferPacket -> {
+                tm?.onOffer(conn, env, p)
+                // Media used to arrive silently. Only `onText` raised the
+                // reminder, so a photo, a video, a voice note or a file landed
+                // with no sound, no buzz and no notification — the phone looked
+                // like nothing had happened. The preview mirrors what the
+                // conversation list shows for that kind.
+                val preview = when {
+                    p.mime.startsWith("image/") -> "[图片]"
+                    p.mime.startsWith("video/") -> "[视频]"
+                    p.mime.startsWith("audio/") -> "[语音]"
+                    p.fileName.isNotBlank() -> "[文件] ${p.fileName}"
+                    else -> "[文件]"
+                }
+                onIncomingNotice?.invoke(p.convId, peerDisplayName(env.from, conn), preview)
+            }
             is FileAcceptPacket -> {
                 relayRoutes[p.transferId]?.accepted?.add(env.from)
                 tm?.onAccept(conn, env, p)
@@ -784,6 +801,28 @@ class Router(
         val direct = byDevice[deviceId]
         if (direct != null && direct.isReady && !direct.isClosed) return direct.send(env)
 
+        // Fall back to the Bluetooth address.
+        //
+        // Links are keyed by deviceId, but a contact created from the bond is
+        // keyed by MAC until its HELLO arrives. Without this, sending to such a
+        // contact found nothing: `createGroup` invited every member by
+        // deviceId, matched none of them, and — because the owner path bails out
+        // when the owner is us — silently delivered no invitations at all. The
+        // group existed on one phone and nowhere else, which is exactly what the
+        // user reported.
+        val address = runCatching {
+            store.contacts().firstOrNull { it.deviceId == deviceId }?.address
+        }.getOrNull()
+        if (!address.isNullOrBlank()) {
+            val viaAddress = byAddress[address]
+            if (viaAddress != null && viaAddress.isReady && !viaAddress.isClosed) {
+                // The peer knows its own id; the envelope has to carry it or the
+                // receiver cannot match the sender to a contact either.
+                val realId = viaAddress.remoteId.takeIf { it.isNotBlank() } ?: deviceId
+                return viaAddress.send(env.copy(to = realId))
+            }
+        }
+
         val groupId = env.groupId ?: return false
         val ownerId = groupOwnerId(groupId) ?: return false
         if (ownerId == myId()) return false
@@ -908,10 +947,16 @@ class Router(
     /**
      * Takes back a message we sent. Local first so the UI reacts at once, then
      * the peer is told to tombstone its copy.
+     *
+     * The attachment goes with it. `recallMessage` clears the `attachment`
+     * column, so afterwards nothing on this phone knows the file ever existed —
+     * and it stayed on disk forever, invisible to every cleanup path. The user
+     * asked for the message to be taken back; the bytes should follow.
      */
     fun recall(messageId: String) {
         val m = store.message(messageId) ?: return
         if (!m.outgoing) return
+        m.attachment?.let { att -> runCatching { media.deleteAttachmentFiles(att) } }
         store.recallMessage(messageId)
         broadcast(m.convId, RecallPacket(m.convId, messageId, System.currentTimeMillis()))
     }
@@ -919,6 +964,8 @@ class Router(
     /** Deletes on both sides — the peer drops the row entirely. */
     fun deleteForEveryone(messageId: String) {
         val m = store.message(messageId) ?: return
+        // Same reasoning as [recall]: the row that names the file is about to go.
+        m.attachment?.let { att -> runCatching { media.deleteAttachmentFiles(att) } }
         store.deleteMessage(messageId)
         broadcast(m.convId, DeleteMessagePacket(m.convId, messageId))
     }
@@ -1329,9 +1376,28 @@ class Router(
     private fun refreshKnownContact(conn: Connection) {
         val id = conn.remoteId
         if (id.isBlank()) return
-        val existing = store.contact(id) ?: return
+        // Look up by deviceId first, then by the paired MAC address.
+        //
+        // A contact created from the Bluetooth bond exists before the peer has
+        // said who it is, so it is keyed by MAC. Matching only on deviceId meant
+        // that row was never found, never upgraded to the real id — and since
+        // `isFriend` also looks up by deviceId, 「配对即好友」 silently did
+        // nothing and every message from a paired phone was downgraded to a
+        // friend request. Finding it here is what migrates the row.
+        val byId = store.contact(id)
+        val byAddress = if (byId == null && conn.address.isNotBlank()) {
+            store.contacts().firstOrNull { it.address.isNotBlank() && it.address == conn.address }
+        } else {
+            null
+        }
+        val existing = byId ?: byAddress ?: return
+        if (byAddress != null && byAddress.deviceId != id) {
+            // Drop the MAC-keyed placeholder so the two do not both show up.
+            runCatching { store.deleteContact(byAddress.deviceId) }
+        }
         store.saveContact(
             existing.copy(
+                deviceId = id,
                 name = conn.remoteName.ifBlank { existing.name },
                 address = conn.address.ifBlank { existing.address },
                 avatarSeed = if (conn.remoteSeed != 0) conn.remoteSeed else existing.avatarSeed,
