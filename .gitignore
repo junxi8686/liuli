@@ -39,5 +39,11 @@ local.properties
 keystore/*.jks
 keystore/keystore.properties
 
+# 本机专用的小工具
+#
+# 上传脚本里写死了这台机器的路径和 GitHub 账号，对别人没有意义。
+# 桌面上各有一份可直接双击的副本。
+tools/upload-liuli.*
+
 # 崩溃日志
 hs_err_pid*.log
