@@ -672,6 +672,36 @@ object Engine : ChatEngine {
         router.dissolveGroup(groupId)
     }
 
+    override fun updateGroupAnnouncement(groupId: String, text: String) {
+        if (!Svc.installed) return
+        router.updateGroupAnnouncement(groupId, text)
+    }
+
+    override fun setGroupMuteAll(groupId: String, on: Boolean) {
+        if (!Svc.installed) return
+        router.setGroupMuteAll(groupId, on)
+    }
+
+    override fun setMemberMuted(groupId: String, deviceId: String, muted: Boolean) {
+        if (!Svc.installed) return
+        router.setMemberMuted(groupId, deviceId, muted)
+    }
+
+    override fun setGroupAdmin(groupId: String, deviceId: String, admin: Boolean) {
+        if (!Svc.installed) return
+        router.setGroupAdmin(groupId, deviceId, admin)
+    }
+
+    override fun transferGroupOwner(groupId: String, deviceId: String) {
+        if (!Svc.installed) return
+        router.transferGroupOwner(groupId, deviceId)
+    }
+
+    override fun setMyGroupNickname(groupId: String, nickname: String) {
+        if (!Svc.installed) return
+        router.setMyGroupNickname(groupId, nickname)
+    }
+
     override fun directConversationWith(contact: Contact): Conversation {
         if (!Svc.installed) {
             return Conversation(id = newId(), kind = ConvKind.DIRECT, title = contact.display, peerId = contact.deviceId)

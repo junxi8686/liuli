@@ -628,7 +628,7 @@ class Router(
         }
         if (existing == null) {
             val conv = incomingConv(env, p.convId, conn)
-            val from = peerDisplayName(env.from, conn)
+            val from = groupAwareName(env, conv.id, conn)
             store.saveMessage(
                 Message(
                     id = p.msgId,
@@ -752,13 +752,20 @@ class Router(
                     iAmOwner = false
                 )
             )
-        } else if (p.name.isNotBlank() || p.avatarSeed != 0) {
-            store.saveConversation(
-                prev.copy(
-                    title = if (p.name.isNotBlank()) p.name else prev.title,
-                    avatarSeed = if (p.avatarSeed != 0) p.avatarSeed else prev.avatarSeed
-                )
+        } else {
+            // Group settings ride along on the same broadcast. Each field is
+            // nullable and means "this update does not change it", so an older
+            // or partial packet can never silently wipe the announcement or
+            // switch 全员禁言 back on.
+            val merged = prev.copy(
+                title = if (p.name.isNotBlank()) p.name else prev.title,
+                avatarSeed = if (p.avatarSeed != 0) p.avatarSeed else prev.avatarSeed,
+                announcement = p.announcement ?: prev.announcement,
+                announcementBy = if (p.announcement != null) p.announcementBy else prev.announcementBy,
+                announcementAt = if (p.announcement != null) p.announcementAt else prev.announcementAt,
+                muteAll = p.muteAll ?: prev.muteAll
             )
+            if (merged != prev) store.saveConversation(merged)
         }
         if (p.members.isNotEmpty()) {
             val me = myId()
@@ -770,6 +777,18 @@ class Router(
                 return
             }
             store.setMembers(p.groupId, list)
+        }
+        // `fromNickname` used to be written by the sender and read by nobody.
+        // The member table normally carries names already, so this is a targeted
+        // fix-up for the one order that leaves it stale: the sender renamed
+        // themselves and immediately sent, and we processed that message before
+        // the update. Cheap, and it keeps the two in step either way.
+        val nick = p.fromNickname
+        if (!nick.isNullOrBlank()) {
+            val sender = store.members(p.groupId).firstOrNull { it.deviceId == env.from }
+            if (sender != null && sender.name != nick) {
+                store.addMember(p.groupId, sender.copy(name = nick))
+            }
         }
         onLinksChanged?.invoke()
     }
@@ -1314,6 +1333,10 @@ class Router(
         val conv = store.conversation(groupId) ?: return
         val rev = System.currentTimeMillis()
         groupRevision[groupId] = rev
+        // 发送者的群昵称随更新一起走：对方离线期间改了昵称又发了消息时，
+        // 他上线后会先看到消息、后收到成员表更新，名字会短暂是旧的。
+        val myNick = store.members(groupId)
+            .firstOrNull { it.deviceId == myId() }?.name.orEmpty()
         broadcast(
             groupId,
             GroupUpdatePacket(
@@ -1321,9 +1344,91 @@ class Router(
                 name = conv.title,
                 avatarSeed = conv.avatarSeed,
                 revision = rev,
-                members = store.members(groupId).map { MemberDto.of(it) }
+                members = store.members(groupId).map { MemberDto.of(it) },
+                announcement = conv.announcement,
+                announcementBy = conv.announcementBy,
+                announcementAt = conv.announcementAt,
+                muteAll = conv.muteAll,
+                fromNickname = myNick
             )
         )
+    }
+
+    // ------------------------------------------------------------ 群管理
+    //
+    // 全部走「改本地 + broadcastUpdate」这一个模式：成员表和群设置本来就是同一次
+    // 广播的内容，没有理由分成两套同步路径。权限（谁有权改）由 UI 决定要不要给
+    // 入口，这里只保证写入和同步本身是正确的。
+
+    /** 群公告：任何成员可见，群主/管理员可改（UI 负责从界面侧收口）。 */
+    fun updateGroupAnnouncement(groupId: String, text: String) {
+        val conv = store.conversation(groupId) ?: return
+        store.saveConversation(
+            conv.copy(
+                announcement = text.trim(),
+                announcementBy = myId(),
+                announcementAt = System.currentTimeMillis()
+            )
+        )
+        broadcastUpdate(groupId)
+    }
+
+    /** 全员禁言。 */
+    fun setGroupMuteAll(groupId: String, on: Boolean) {
+        val conv = store.conversation(groupId) ?: return
+        store.saveConversation(conv.copy(muteAll = on))
+        broadcastUpdate(groupId)
+    }
+
+    /** 单人禁言：改成员表里的那一位，然后广播整张表。 */
+    fun setMemberMuted(groupId: String, deviceId: String, muted: Boolean) {
+        val member = store.members(groupId).firstOrNull { it.deviceId == deviceId } ?: return
+        if (member.muted == muted) return
+        store.addMember(groupId, member.copy(muted = muted))
+        broadcastUpdate(groupId)
+    }
+
+    /** 设/取消管理员。群主不能被降级 —— 要换群主请用 [transferGroupOwner]。 */
+    fun setGroupAdmin(groupId: String, deviceId: String, admin: Boolean) {
+        val member = store.members(groupId).firstOrNull { it.deviceId == deviceId } ?: return
+        if (member.role == Role.OWNER) return
+        val role = if (admin) Role.ADMIN else Role.MEMBER
+        if (member.role == role) return
+        store.addMember(groupId, member.copy(role = role))
+        broadcastUpdate(groupId)
+    }
+
+    /**
+     * 转让群主：两位成员的 role 一起改，本机的 `iAmOwner` 也跟着翻，
+     * 否则群主退群/解散的判定会在本机继续按旧身份走。
+     */
+    fun transferGroupOwner(groupId: String, deviceId: String) {
+        val conv = store.conversation(groupId) ?: return
+        val members = store.members(groupId)
+        val target = members.firstOrNull { it.deviceId == deviceId } ?: return
+        val me = myId()
+        if (target.role == Role.OWNER) return
+        members.forEach { m ->
+            val role = when (m.deviceId) {
+                deviceId -> Role.OWNER
+                me -> if (m.role == Role.OWNER) Role.MEMBER else m.role
+                else -> m.role
+            }
+            if (role != m.role) store.addMember(groupId, m.copy(role = role))
+        }
+        store.saveConversation(conv.copy(iAmOwner = false))
+        systemMessage(groupId, "群主已转让给 ${target.name}")
+        broadcastUpdate(groupId)
+    }
+
+    /** 我在本群的昵称：写自己的成员行，再广播——对方看到的就是新名字。 */
+    fun setMyGroupNickname(groupId: String, nickname: String) {
+        val me = myId()
+        val member = store.members(groupId).firstOrNull { it.deviceId == me } ?: return
+        val name = nickname.trim().ifBlank { member.name }
+        if (name == member.name) return
+        store.addMember(groupId, member.copy(name = name))
+        broadcastUpdate(groupId)
     }
 
     fun isOwner(groupId: String): Boolean = store.conversation(groupId)?.iAmOwner == true
@@ -1365,6 +1470,31 @@ class Router(
         store.contact(deviceId)?.display?.takeIf { it.isNotBlank() }
             ?: conn.remoteName.takeIf { it.isNotBlank() }
             ?: deviceId.take(8)
+
+    /**
+     * The name to print on a message, which is **not** the same as the contact
+     * name inside a group.
+     *
+     * WeChat labels group messages with the sender's group nickname; the contact
+     * card only applies in a one-to-one chat. Resolving through
+     * [peerDisplayName] everywhere meant that after someone renamed themselves
+     * in the group, the member grid updated (it reads the member table) while
+     * every message header kept the old contact name — two names for one person
+     * on the same screen.
+     *
+     * Order: group member table → contact → remote name → short id.
+     */
+    private fun groupAwareName(env: Envelope, convId: String, conn: Connection): String {
+        if (env.groupId != null) {
+            runCatching {
+                store.members(convId)
+                    .firstOrNull { it.deviceId == env.from }
+                    ?.name
+                    ?.takeIf { it.isNotBlank() }
+            }.getOrNull()?.let { return it }
+        }
+        return peerDisplayName(env.from, conn)
+    }
 
     /**
      * 刷新**已存在**联系人的名字 / 头像 / MAC / 最近在线时间。

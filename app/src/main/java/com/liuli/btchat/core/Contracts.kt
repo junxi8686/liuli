@@ -149,6 +149,19 @@ interface ChatEngine {
     fun leaveGroup(groupId: String)
     fun dissolveGroup(groupId: String)
 
+    // ---- 群管理（微信对等）----
+    //
+    // All of these write locally and then broadcast the member table + group
+    // settings in one `GroupUpdatePacket`; nothing here decides who is allowed
+    // to do what — the UI only shows the entries to the owner/admin, which keeps
+    // the transport free of policy it cannot verify anyway.
+    fun updateGroupAnnouncement(groupId: String, text: String)
+    fun setGroupMuteAll(groupId: String, on: Boolean)
+    fun setMemberMuted(groupId: String, deviceId: String, muted: Boolean)
+    fun setGroupAdmin(groupId: String, deviceId: String, admin: Boolean)
+    fun transferGroupOwner(groupId: String, deviceId: String)
+    fun setMyGroupNickname(groupId: String, nickname: String)
+
     fun directConversationWith(contact: Contact): Conversation
     fun ensureDirectConversation(peer: Peer): Conversation
 }

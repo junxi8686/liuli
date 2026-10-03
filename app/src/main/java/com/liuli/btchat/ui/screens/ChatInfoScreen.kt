@@ -121,6 +121,16 @@ fun ChatInfoScreen(
     var ownerLeaveOpen by remember { mutableStateOf(false) }
     var announcementOpen by remember { mutableStateOf(false) }
     val myId = remember { Svc.settings.ensureIdentity().myDeviceId }
+    var announcementEditOpen by remember { mutableStateOf(false) }
+    var nicknameOpen by remember { mutableStateOf(false) }
+    var adminTarget by remember { mutableStateOf<Member?>(null) }
+    var ownerTarget by remember { mutableStateOf<Member?>(null) }
+    var muteTarget by remember { mutableStateOf<Member?>(null) }
+    // 群主或管理员才能管理（只读成员看到的是公告和禁言标记，没有入口）
+    val iAmAdmin = remember(members, myId) {
+        members.firstOrNull { it.deviceId == myId }?.role?.let { it == Role.OWNER || it == Role.ADMIN }
+            ?: false
+    }
 
     // 邀请面板：只在打开时读一次联系人，再过滤掉已经在群里的
     var inviteSelection by remember { mutableStateOf<Set<String>>(emptySet()) }
@@ -332,31 +342,66 @@ fun ChatInfoScreen(
                     )
                 }
 
-                // ---------------------------------------------------- 群公告 / 全员禁言（只读展示）
+                // ---------------------------------------------------- 群公告 / 全员禁言 / 群昵称
                 //
-                // 写入要等 bt 侧的 updateGroupAnnouncement / setGroupMuteAll（`Router` 现在
-                // 由 bt-transport 在改，不同时动同一个文件）。所以这里**只显示、不放编辑
-                // 按钮** —— 放一个点了没反应的「编辑公告」才是骗人。接口到位后在这里加
-                // 编辑入口即可，展示逻辑不用再动。
+                // 群主/管理员：公告能编辑、全员禁言能开关；
+                // 普通成员：**只读**（公告能看、禁言标记能看），不给点了没反应的入口。
                 val announcement = conversation?.announcement.orEmpty()
                 val muteAll = conversation?.muteAll == true
-                if (isGroup && (announcement.isNotBlank() || muteAll)) {
+                if (isGroup) {
                     Card {
+                        InfoRow(
+                            label = "群公告",
+                            value = announcement.ifBlank {
+                                if (iAmAdmin) "点击发布群公告" else "暂无公告"
+                            },
+                            onClick = {
+                                if (iAmAdmin) {
+                                    announcementEditOpen = true
+                                } else if (announcement.isNotBlank()) {
+                                    announcementOpen = true
+                                } else {
+                                    notice = "群里还没有公告"
+                                }
+                            }
+                        )
                         if (announcement.isNotBlank()) {
+                            Hairline()
                             InfoRow(
-                                label = "群公告",
-                                value = announcement,
+                                label = "查看公告全文",
+                                value = conversation?.announcementAt?.takeIf { it > 0L }
+                                    ?.let { TimeFmt.clock(it) }
+                                    .orEmpty(),
                                 onClick = { announcementOpen = true }
                             )
                         }
-                        if (muteAll) {
-                            if (announcement.isNotBlank()) Hairline()
+                        if (iAmAdmin) {
+                            Hairline()
+                            SwitchRow(
+                                label = "全员禁言",
+                                subtitle = "开启后只有群主和管理员能发言",
+                                checked = muteAll,
+                                onCheckedChange = { on ->
+                                    runCatching { Svc.engine.setGroupMuteAll(convId, on) }
+                                    notice = if (on) "已开启全员禁言" else "已关闭全员禁言"
+                                }
+                            )
+                        } else if (muteAll) {
+                            Hairline()
                             InfoRow(
                                 label = "全员禁言",
                                 value = "已开启（只有群主和管理员能发言）",
                                 onClick = { notice = "全员禁言进行中：只有群主和管理员能发言" }
                             )
                         }
+                        // 群昵称：所有成员都能改自己的（改了对方看到的就是新名字）
+                        Hairline()
+                        val myNick = members.firstOrNull { it.deviceId == myId }?.name.orEmpty()
+                        InfoRow(
+                            label = "我在本群的昵称",
+                            value = myNick.ifBlank { "未设置（用本机昵称）" },
+                            onClick = { nicknameOpen = true }
+                        )
                     }
                 }
 
@@ -529,6 +574,51 @@ fun ChatInfoScreen(
                                     }
                                 )
                             )
+                            // ---- 群主/管理员操作（每一项都有二次确认）----
+                            add(
+                                SheetAction(
+                                    icon = LiuliIcons.Mute,
+                                    label = if (menuMember.muted) "解除禁言" else "禁言此人",
+                                    description = if (menuMember.muted) {
+                                        "恢复 TA 在群里发言"
+                                    } else {
+                                        "禁言后 TA 不能在群里发言"
+                                    },
+                                    onClick = {
+                                        memberMenuFor = null
+                                        muteTarget = menuMember
+                                    }
+                                )
+                            )
+                            if (iAmOwner) {
+                                val isAdmin = menuMember.role == Role.ADMIN
+                                add(
+                                    SheetAction(
+                                        icon = LiuliIcons.Verified,
+                                        label = if (isAdmin) "取消管理员" else "设为管理员",
+                                        description = if (isAdmin) {
+                                            "收回管理权限（公告、禁言、踢人）"
+                                        } else {
+                                            "可以发布公告、禁言他人、移出成员"
+                                        },
+                                        onClick = {
+                                            memberMenuFor = null
+                                            adminTarget = menuMember
+                                        }
+                                    )
+                                )
+                                add(
+                                    SheetAction(
+                                        icon = LiuliIcons.Swap,
+                                        label = "转让群主",
+                                        description = "转让后你变成普通成员，无法撤销",
+                                        onClick = {
+                                            memberMenuFor = null
+                                            ownerTarget = menuMember
+                                        }
+                                    )
+                                )
+                            }
                             add(
                                 SheetAction(
                                     icon = LiuliIcons.Delete,
@@ -540,6 +630,81 @@ fun ChatInfoScreen(
                                     }
                                 )
                             )
+                        }
+                    }
+                )
+
+                // ---- 禁言确认 ----
+                val mute = muteTarget
+                GlassConfirmDialog(
+                    visible = mute != null,
+                    title = if (mute?.muted == true) "解除禁言" else "禁言此人",
+                    message = if (mute?.muted == true) {
+                        "恢复「${mute?.name?.ifBlank { mute.deviceId.take(8) } ?: ""}」在群里发言？"
+                    } else {
+                        "「${mute?.name?.ifBlank { mute.deviceId.take(8) } ?: ""}」将不能在群里发言，" +
+                            "私聊不受影响。"
+                    },
+                    destructive = mute?.muted != true,
+                    confirmText = if (mute?.muted == true) "解除" else "禁言",
+                    onDismiss = { muteTarget = null },
+                    onConfirm = {
+                        val target = muteTarget
+                        muteTarget = null
+                        if (target != null) {
+                            val next = !target.muted
+                            runCatching { Svc.engine.setMemberMuted(convId, target.deviceId, next) }
+                            notice = if (next) {
+                                "已禁言 ${target.name.ifBlank { target.deviceId.take(8) }}"
+                            } else {
+                                "已解除禁言"
+                            }
+                        }
+                    }
+                )
+
+                // ---- 管理员确认 ----
+                val admin = adminTarget
+                GlassConfirmDialog(
+                    visible = admin != null,
+                    title = if (admin?.role == Role.ADMIN) "取消管理员" else "设为管理员",
+                    message = if (admin?.role == Role.ADMIN) {
+                        "收回「${admin?.name?.ifBlank { admin.deviceId.take(8) } ?: ""}」的管理权限？"
+                    } else {
+                        "「${admin?.name?.ifBlank { admin.deviceId.take(8) } ?: ""}」将可以发布公告、" +
+                            "禁言他人、移出成员。"
+                    },
+                    destructive = admin?.role == Role.ADMIN,
+                    confirmText = if (admin?.role == Role.ADMIN) "取消" else "设为管理员",
+                    onDismiss = { adminTarget = null },
+                    onConfirm = {
+                        val target = adminTarget
+                        adminTarget = null
+                        if (target != null) {
+                            val next = target.role != Role.ADMIN
+                            runCatching { Svc.engine.setGroupAdmin(convId, target.deviceId, next) }
+                            notice = if (next) "已设为管理员" else "已取消管理员"
+                        }
+                    }
+                )
+
+                // ---- 转让群主确认（最危险的操作，文案要说清不可撤销）----
+                val nextOwner = ownerTarget
+                GlassConfirmDialog(
+                    visible = nextOwner != null,
+                    title = "转让群主",
+                    message = "把群主转让给「${nextOwner?.name?.ifBlank { nextOwner.deviceId.take(8) } ?: ""}」？" +
+                        "转让后你成为普通成员，对方获得解散群聊、转让群主等全部权限，" +
+                        "**此操作无法撤销**。",
+                    destructive = true,
+                    confirmText = "确认转让",
+                    onDismiss = { ownerTarget = null },
+                    onConfirm = {
+                        val target = ownerTarget
+                        ownerTarget = null
+                        if (target != null) {
+                            runCatching { Svc.engine.transferGroupOwner(convId, target.deviceId) }
+                            notice = "群主已转让给 ${target.name.ifBlank { target.deviceId.take(8) }}"
                         }
                     }
                 )
@@ -815,6 +980,33 @@ fun ChatInfoScreen(
                         leaveOpen = false
                         runCatching { Svc.engine.leaveGroup(convId) }
                         onLeft()
+                    }
+                )
+
+                GlassTextPrompt(
+                    visible = announcementEditOpen,
+                    title = "群公告",
+                    initial = conversation?.announcement.orEmpty(),
+                    hint = "写点什么给全体成员看（留空即清除公告）",
+                    onDismiss = { announcementEditOpen = false },
+                    onConfirm = { text ->
+                        announcementEditOpen = false
+                        runCatching { Svc.engine.updateGroupAnnouncement(convId, text.trim()) }
+                        notice = if (text.isBlank()) "已清除群公告" else "群公告已更新"
+                    }
+                )
+
+                GlassTextPrompt(
+                    visible = nicknameOpen,
+                    title = "我在本群的昵称",
+                    initial = members.firstOrNull { it.deviceId == myId }?.name.orEmpty(),
+                    hint = "群昵称（留空则用本机昵称）",
+                    onDismiss = { nicknameOpen = false },
+                    onConfirm = { text ->
+                        nicknameOpen = false
+                        val trimmed = text.trim()
+                        runCatching { Svc.engine.setMyGroupNickname(convId, trimmed) }
+                        notice = "群昵称已更新，对方会看到新名字"
                     }
                 )
 
